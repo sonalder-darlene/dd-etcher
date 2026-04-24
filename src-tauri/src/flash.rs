@@ -197,9 +197,9 @@ fn authenticate_sudo() -> Result<()> {
         .args([
             "-e",
             "set r to display dialog \
-             \"dd-etcher needs administrator access to flash the drive.\" \
+             \"dd-Etcher needs administrator access to flash the drive.\" \
              with hidden answer default answer \"\" \
-             with title \"dd-etcher\" \
+             with title \"dd-Etcher\" \
              buttons {\"Cancel\", \"OK\"} default button \"OK\"",
             "-e",
             "return text returned of r",
@@ -293,7 +293,7 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
             return Err(anyhow!(
                 "Permission denied.\n\
                  Go to System Settings → Privacy & Security → Full Disk Access\n\
-                 and add dd-etcher, then try again."
+                 and add dd-Etcher, then try again."
             ));
         }
         return Err(anyhow!(

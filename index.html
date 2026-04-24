@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>dd-etcher</title>
+    <title>dd-Etcher</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
@@ -11,10 +11,10 @@
       <div class="fda-card">
         <div class="fda-icon">⚠</div>
         <h2>Full Disk Access required</h2>
-        <p class="fda-desc">dd-etcher needs Full Disk Access to read and write block devices. Without it, flashing will fail.</p>
+        <p class="fda-desc">dd-Etcher needs Full Disk Access to read and write block devices. Without it, flashing will fail.</p>
         <ol class="fda-steps">
           <li>Click <strong>Open System Settings</strong> below.</li>
-          <li>Find <strong>dd-etcher</strong> in the list and toggle it on.</li>
+          <li>Find <strong>dd-Etcher</strong> in the list and toggle it on.</li>
         </ol>
         <button id="fda-open" class="fda-primary">Open System Settings</button>
         <div class="fda-check-row">
@@ -26,9 +26,31 @@
 
     <main class="app">
       <header>
-        <h1>dd-etcher</h1>
+        <h1>dd-Etcher</h1>
         <p class="tagline">Flash an image to a drive. Nothing else.</p>
+        <button id="about-btn" class="about-btn" title="About">?</button>
       </header>
+
+      <div id="about-overlay" class="about-overlay hidden">
+        <div class="about-card">
+          <button id="about-close" class="about-close" title="Close">✕</button>
+          <h2>dd-Etcher</h2>
+          <dl class="about-dl">
+            <dt>Version</dt><dd id="about-version">—</dd>
+            <dt>Author</dt><dd>Darlene Sonalder &amp; Claude Code (Anthropic)</dd>
+            <dt>License</dt><dd>GPL-3.0</dd>
+            <dt>Source</dt><dd><button class="link-btn" id="about-repo">github.com/sonalder-darlene/dd-Etcher</button></dd>
+          </dl>
+          <p class="about-acks-title">Acknowledgments</p>
+          <ul class="about-acks">
+            <li><strong>dd(1)</strong> — the Unix tool at the core</li>
+            <li><strong>Rust</strong> — systems language powering the backend</li>
+            <li><strong>Tauri</strong> — native app framework</li>
+            <li><strong>sha2</strong> — SHA-256 by RustCrypto</li>
+            <li><strong>Gulax</strong> — logo typeface by Morgan Gilbert &amp; Anton Moglia (SIL OFL 1.1)</li>
+          </ul>
+        </div>
+      </div>
 
       <section class="step" data-step="1">
         <div class="step-label">1. Image</div>

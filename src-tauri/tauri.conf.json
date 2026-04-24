@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "dd-etcher",
+  "productName": "dd-Etcher",
   "version": "0.1.1",
   "identifier": "dev.ddetcher.app",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "dd-etcher",
+        "title": "dd-Etcher",
         "width": 560,
         "height": 620,
         "minWidth": 480,

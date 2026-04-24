@@ -27,12 +27,30 @@ fdaCheckBtn.addEventListener("click", async () => {
   fdaHint.textContent = "";
   const granted = await checkFda();
   if (!granted) {
-    fdaHint.textContent = "Still not granted — make sure to toggle dd-etcher on.";
+    fdaHint.textContent = "Still not granted — make sure to toggle dd-Etcher on.";
   }
 });
 
 // Check FDA on load before anything else.
 checkFda();
+// ---
+
+// --- About ---
+const aboutBtn = $<HTMLButtonElement>("about-btn");
+const aboutOverlay = $<HTMLDivElement>("about-overlay");
+const aboutClose = $<HTMLButtonElement>("about-close");
+const aboutVersion = $<HTMLElement>("about-version");
+const aboutRepo = $<HTMLButtonElement>("about-repo");
+
+aboutBtn.addEventListener("click", async () => {
+  aboutVersion.textContent = await invoke<string>("app_version");
+  aboutOverlay.classList.remove("hidden");
+});
+aboutClose.addEventListener("click", () => aboutOverlay.classList.add("hidden"));
+aboutOverlay.addEventListener("click", (e) => {
+  if (e.target === aboutOverlay) aboutOverlay.classList.add("hidden");
+});
+aboutRepo.addEventListener("click", () => invoke("open_repo"));
 // ---
 
 let selectedImage: string | null = null;
