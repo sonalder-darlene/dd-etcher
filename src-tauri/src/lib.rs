@@ -86,6 +86,43 @@ fn is_safe_device(device: &str) -> bool {
     }
 }
 
+/// Check whether the app has Full Disk Access.
+///
+/// In debug builds the binary is a child of the dev server (node/pnpm), so
+/// macOS TCC doesn't recognise it as the responsible app and the file-access
+/// probe always returns EPERM regardless of FDA status. Skip the check there;
+/// it works correctly in the release .app bundle where Finder is the launcher.
+#[tauri::command]
+fn check_fda() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        true
+    }
+    #[cfg(all(not(debug_assertions), target_os = "macos"))]
+    {
+        // The system TCC database is gated behind FDA for every process.
+        // EPERM = TCC is blocking (no FDA). Any other result = FDA granted.
+        let path = "/Library/Application Support/com.apple.TCC/TCC.db";
+        match std::fs::File::open(path) {
+            Ok(_) => true,
+            Err(e) => e.raw_os_error() != Some(libc::EPERM),
+        }
+    }
+    #[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+    {
+        true
+    }
+}
+
+/// Open System Settings directly to the Full Disk Access page.
+#[tauri::command]
+fn open_fda_settings() {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn();
+}
+
 use tauri::Manager as _;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -95,6 +132,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             drives::list_drives,
             flash::flash,
+            check_fda,
+            open_fda_settings,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

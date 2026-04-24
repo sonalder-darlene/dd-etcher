@@ -7,6 +7,23 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <div id="fda-overlay" class="fda-overlay hidden">
+      <div class="fda-card">
+        <div class="fda-icon">⚠</div>
+        <h2>Full Disk Access required</h2>
+        <p class="fda-desc">dd-etcher needs Full Disk Access to read and write block devices. Without it, flashing will fail.</p>
+        <ol class="fda-steps">
+          <li>Click <strong>Open System Settings</strong> below.</li>
+          <li>Find <strong>dd-etcher</strong> in the list and toggle it on.</li>
+        </ol>
+        <button id="fda-open" class="fda-primary">Open System Settings</button>
+        <div class="fda-check-row">
+          <button id="fda-check" class="fda-secondary">Check again</button>
+          <span id="fda-hint" class="fda-hint"></span>
+        </div>
+      </div>
+    </div>
+
     <main class="app">
       <header>
         <h1>dd-etcher</h1>

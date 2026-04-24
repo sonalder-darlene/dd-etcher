@@ -33,7 +33,8 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 - Select an image (`.img`, `.iso`, `.dmg`, `.bin`, `.raw`)
 - Select an external drive (internal drives should be hidden automatically to avoid mistakes)
 - Flash via `dd` (It will ask for your admin password to do so)
-- Verify flash integrity via SHA-256 checksum
+- Verify flash integrity via SHA-256 checksum with live progress
+- Full Disk Access onboarding screen — blocks the UI and guides you through the one-time setup if FDA has not been granted yet
 - Built with Rust and Tauri + WKWebView
 - No telemetry, no network calls, no accounts, no BS
 
@@ -97,6 +98,8 @@ pnpm tauri dev
 Grant Full Disk Access to the debug binary the first time:
 `src-tauri/target/debug/dd-etcher`
 
+> **Note:** The FDA onboarding overlay only activates in release builds. In dev mode the check is skipped automatically, so the overlay will not appear. The FDA grant is still required for the privileged flash helper to write to the drive — grant it once and it persists across rebuilds.
+
 ### Build
 
 ```sh
@@ -114,7 +117,7 @@ The Rust core has platform-specific branches for drive enumeration (`lsblk` inst
 
 - [ ] Improve privilege escalation, probably via SMAppService helper (removes the FDA requirement)
 - [ ] Friendlier error messages when `dd` fails mid-write (capture and surface `dd` stderr)
-- [ ] Progress tracking during the verify phase
+- [x] Progress tracking during the verify phase
 - [ ] TUI frontend sharing the same Rust core (`ratatui`)
 - [ ] Compressed image support (`.img.xz`, `.img.gz`)
 - [ ] CI: build + notarize macOS, Flatpak on Linux

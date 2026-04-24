@@ -5,6 +5,36 @@ import type { Drive, FlashProgress } from "./types";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
+// --- FDA onboarding ---
+const fdaOverlay = $<HTMLDivElement>("fda-overlay");
+const fdaOpenBtn = $<HTMLButtonElement>("fda-open");
+const fdaCheckBtn = $<HTMLButtonElement>("fda-check");
+const fdaHint = $<HTMLSpanElement>("fda-hint");
+
+async function checkFda() {
+  const granted: boolean = await invoke("check_fda");
+  if (granted) {
+    fdaOverlay.classList.add("hidden");
+  } else {
+    fdaOverlay.classList.remove("hidden");
+  }
+  return granted;
+}
+
+fdaOpenBtn.addEventListener("click", () => invoke("open_fda_settings"));
+
+fdaCheckBtn.addEventListener("click", async () => {
+  fdaHint.textContent = "";
+  const granted = await checkFda();
+  if (!granted) {
+    fdaHint.textContent = "Still not granted — make sure to toggle dd-etcher on.";
+  }
+});
+
+// Check FDA on load before anything else.
+checkFda();
+// ---
+
 let selectedImage: string | null = null;
 let selectedDrive: Drive | null = null;
 let drives: Drive[] = [];
