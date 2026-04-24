@@ -30,6 +30,8 @@ pub fn privileged_sha256(device: &str, limit: u64) {
             Ok(n) => {
                 hasher.update(&buf[..n]);
                 remaining -= n as u64;
+                // Report bytes read so far to the parent process via stderr.
+                eprintln!("{}", limit - remaining);
             }
             Err(e) => {
                 eprintln!("dd-etcher: read error: {e}");
