@@ -117,3 +117,189 @@ select {
 .status { font-size: 13px; min-height: 18px; }
 .status.error { color: var(--danger); }
 .status.ok { color: var(--success); }
+
+/* About button */
+header { position: relative; }
+
+.about-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+.about-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* About modal */
+.about-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.about-overlay.hidden { display: none; }
+
+.about-card {
+  position: relative;
+  max-width: 380px;
+  width: calc(100% - 48px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.about-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 50%;
+}
+.about-close:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.about-card h2 { margin: 0; font-size: 18px; font-weight: 600; }
+
+.about-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+.about-dl dt { color: var(--text-dim); white-space: nowrap; }
+.about-dl dd { margin: 0; }
+
+.link-btn {
+  all: unset;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.link-btn:hover { text-decoration: underline; }
+
+.about-acks-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.about-acks {
+  margin: 0;
+  padding: 0 0 0 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.8;
+}
+
+/* FDA onboarding overlay */
+.fda-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.fda-overlay.hidden { display: none; }
+
+.fda-card {
+  max-width: 400px;
+  width: calc(100% - 48px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: center;
+}
+
+.fda-icon {
+  font-size: 32px;
+  line-height: 1;
+  color: #f0a500;
+}
+
+.fda-card h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.fda-desc {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.fda-steps {
+  margin: 0;
+  padding: 0 0 0 20px;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+}
+
+.fda-primary {
+  background: var(--accent);
+  color: #0c1230;
+  border-color: var(--accent);
+  font-weight: 600;
+  padding: 12px;
+}
+.fda-primary:hover { background: var(--accent-hover); }
+
+.fda-check-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.fda-secondary {
+  background: var(--surface-hover);
+  width: 100%;
+  padding: 10px;
+}
+
+.fda-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-height: 14px;
+}

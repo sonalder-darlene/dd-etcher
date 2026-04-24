@@ -1,26 +1,12 @@
-```
-         *****              ***                                                                    ****                                          
-         *****              ***                     **********                                     ****                                          
-         *****              ***                   **************    ****                           ****                                          
-         *****              ***                  *****      ****    ****                           ****                                          
-**************    *************                  ****               **** *****      *********      **** **********      *********      **********
-**************    *************                  ****               **********     ************    ***************    #***** *****     **********
-****     *****    ****      ***    **********    ************       *****         ****     ****    *****#    +****    ****     ****    *****     
-****     *****    ****      ***    **********    ************       ****          ****             ****      +****    ****    *****    ****      
-****     *****    ****      ***                  ****               ****          ****             ****      +****    ************     ****      
-****     *****    ****      ***                  ****               ****          ****             ****      +****    **********       ****      
-****    ******    ****    *****                  ****               ****          ****             ****      +****    ****             ****      
-**************    *************                  ***************    **********    *************    ****      +****    ************     ****      
-********+*****    ********% ***                  ***************    **********    *************    ****      +****    ************     ****
-```
+![dd-Etcher](assets/logo-wide.png)
 
 A minimal image flasher for macOS (and soon Linux). Think Balena Etcher, but without the telemetry, the bloat, or the bundled Chromium. It wraps the reliable `dd(1)` shell tool directly under the hood.
 
-> **Disclaimer:** dd-etcher is in early development. Please use with caution and report bugs.
+> **Disclaimer:** dd-Etcher is in early development. Please use with caution and report bugs.
 
 ## Why
 
-Balena Etcher is the de-facto GUI image flasher on macOS but ships with aggressive telemetry and a heavy Electron bundle. For many users, the terminal is intimidating and `dd` has a reputation for being "Disk Destroyer". That's why I created a BS-free `dd` GUI with the help of Claude Code. dd-etcher does the same four things as Balena Etcher:
+Balena Etcher is the de-facto GUI image flasher on macOS but ships with aggressive telemetry and a heavy Electron bundle. For many users, the terminal is intimidating and `dd` has a reputation for being "Disk Destroyer". That's why I created a BS-free `dd` GUI with the help of Claude Code. dd-Etcher does the same four things as Balena Etcher:
 1. Pick an image
 2. Choose a drive
 3. Flash the image onto it
@@ -33,7 +19,8 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 - Select an image (`.img`, `.iso`, `.dmg`, `.bin`, `.raw`)
 - Select an external drive (internal drives should be hidden automatically to avoid mistakes)
 - Flash via `dd` (It will ask for your admin password to do so)
-- Verify flash integrity via SHA-256 checksum
+- Verify flash integrity via SHA-256 checksum with live progress
+- Full Disk Access onboarding screen — blocks the UI and guides you through the one-time setup if FDA has not been granted yet
 - Built with Rust and Tauri + WKWebView
 - No telemetry, no network calls, no accounts, no BS
 
@@ -57,7 +44,7 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 
 ### Privilege escalation
 
-Writing to a raw block device requires root. dd-etcher uses a two-step approach that keeps the process tree intact so macOS TCC correctly identifies our app as the responsible process:
+Writing to a raw block device requires root. dd-Etcher uses a two-step approach that keeps the process tree intact so macOS TCC correctly identifies our app as the responsible process:
 
 1. **Authenticate once:** a native macOS password dialog (via `osascript`) collects the credential. `sudo -S -v` validates and caches it. Clicking Cancel aborts immediately.
 2. **Flash and verify as root:** `sudo -n` (non-interactive, cached credential) invokes our own binary with `--privileged-flash` or `--privileged-sha256`. No separate helper binary is needed; the app doubles as its own privileged helper.
@@ -97,6 +84,8 @@ pnpm tauri dev
 Grant Full Disk Access to the debug binary the first time:
 `src-tauri/target/debug/dd-etcher`
 
+> **Note:** The FDA onboarding overlay only activates in release builds. In dev mode the check is skipped automatically, so the overlay will not appear. The FDA grant is still required for the privileged flash helper to write to the drive — grant it once and it persists across rebuilds.
+
 ### Build
 
 ```sh
@@ -114,7 +103,7 @@ The Rust core has platform-specific branches for drive enumeration (`lsblk` inst
 
 - [ ] Improve privilege escalation, probably via SMAppService helper (removes the FDA requirement)
 - [ ] Friendlier error messages when `dd` fails mid-write (capture and surface `dd` stderr)
-- [ ] Progress tracking during the verify phase
+- [x] Progress tracking during the verify phase
 - [ ] TUI frontend sharing the same Rust core (`ratatui`)
 - [ ] Compressed image support (`.img.xz`, `.img.gz`)
 - [ ] CI: build + notarize macOS, Flatpak on Linux

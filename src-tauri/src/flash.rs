@@ -23,18 +23,25 @@ pub async fn flash(
     app: AppHandle,
     image_path: String,
     drive_id: String,
+    drive_size_bytes: u64,
 ) -> Result<(), String> {
-    flash_inner(app, image_path, drive_id)
+    flash_inner(app, image_path, drive_id, drive_size_bytes)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
-async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Result<()> {
+async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive_size_bytes: u64) -> Result<()> {
     let image = Path::new(&image_path);
     if !image.is_file() {
         return Err(anyhow!("image not found: {image_path}"));
     }
     let total_bytes = std::fs::metadata(image)?.len();
+
+    if total_bytes > drive_size_bytes {
+        return Err(anyhow!(
+            "image is larger than the drive — aborting to prevent a partial write."
+        ));
+    }
 
     // Resolve the device path for the selected drive id. We intentionally
     // build the path ourselves rather than trusting the frontend, so the
@@ -94,24 +101,56 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Re
     });
 
     let self_exe = std::env::current_exe().context("cannot find own executable")?;
-    let verify_output = tokio::task::spawn_blocking({
-        let exe = self_exe.clone();
-        let dev = device_path.clone();
-        move || {
-            Command::new("/usr/bin/sudo")
-                .args(["-n", exe.to_str().unwrap(), "--privileged-sha256", &dev, &total_bytes.to_string()])
-                .output()
-        }
-    })
-    .await?
-    .context("failed to run privileged sha256")?;
 
-    if !verify_output.status.success() {
-        let msg = String::from_utf8_lossy(&verify_output.stderr);
-        return Err(anyhow!("verification read failed: {}", msg.trim()));
+    // Use tokio::process so we can read stderr line-by-line for live progress
+    // while the privileged helper hashes the device.
+    let mut child = tokio::process::Command::new("/usr/bin/sudo")
+        .args(["-n", self_exe.to_str().unwrap(), "--privileged-sha256", &device_path, &total_bytes.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn privileged sha256")?;
+
+    // Read progress lines from stderr and emit events.
+    let stderr = child.stderr.take().unwrap();
+    let mut lines = tokio::io::BufReader::new(stderr);
+    let mut line = String::new();
+    let mut last_bytes = 0u64;
+    let mut last_tick = std::time::Instant::now();
+    loop {
+        line.clear();
+        use tokio::io::AsyncBufReadExt as _;
+        if tokio::io::AsyncBufReadExt::read_line(&mut lines, &mut line).await? == 0 {
+            break;
+        }
+        if let Ok(bytes) = line.trim().parse::<u64>() {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
+            let rate = ((bytes.saturating_sub(last_bytes)) as f64 / dt) as u64;
+            last_bytes = bytes;
+            last_tick = now;
+            let _ = app.emit("flash-progress", FlashProgress {
+                bytes_written: bytes,
+                total_bytes,
+                bytes_per_second: rate,
+                phase: "verifying",
+            });
+        }
     }
 
-    let device_hash_hex = String::from_utf8_lossy(&verify_output.stdout).trim().to_string();
+    // Collect stdout (the final SHA-256 hex) and wait for exit.
+    let mut stdout_buf = Vec::new();
+    use tokio::io::AsyncReadExt as _;
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_end(&mut stdout_buf).await.ok();
+    }
+    let status = child.wait().await.context("waiting for sha256 helper")?;
+
+    if !status.success() {
+        return Err(anyhow!("verification read failed: helper exited with {status}"));
+    }
+
+    let device_hash_hex = String::from_utf8_lossy(&stdout_buf).trim().to_string();
     let image_hash_hex: String = image_hash.iter().map(|b| format!("{b:02x}")).collect();
 
     if device_hash_hex != image_hash_hex {
@@ -165,9 +204,9 @@ fn authenticate_sudo() -> Result<()> {
         .args([
             "-e",
             "set r to display dialog \
-             \"dd-etcher needs administrator access to flash the drive.\" \
+             \"dd-Etcher needs administrator access to flash the drive.\" \
              with hidden answer default answer \"\" \
-             with title \"dd-etcher\" \
+             with title \"dd-Etcher\" \
              buttons {\"Cancel\", \"OK\"} default button \"OK\"",
             "-e",
             "return text returned of r",
@@ -261,7 +300,7 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
             return Err(anyhow!(
                 "Permission denied.\n\
                  Go to System Settings → Privacy & Security → Full Disk Access\n\
-                 and add dd-etcher, then try again."
+                 and add dd-Etcher, then try again."
             ));
         }
         return Err(anyhow!(
