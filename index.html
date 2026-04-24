@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dd-etcher</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>dd-etcher</h1>
+        <p class="tagline">Flash an image to a drive. Nothing else.</p>
+      </header>
+
+      <section class="step" data-step="1">
+        <div class="step-label">1. Image</div>
+        <button id="pick-image" class="pick">Choose an image…</button>
+        <div id="image-info" class="info hidden"></div>
+      </section>
+
+      <section class="step" data-step="2">
+        <div class="step-label">2. Drive</div>
+        <div class="drive-row">
+          <select id="drive-select">
+            <option value="">No drive selected</option>
+          </select>
+          <button id="refresh-drives" class="refresh" title="Refresh drives">↻</button>
+        </div>
+        <div id="drive-info" class="info hidden"></div>
+      </section>
+
+      <section class="step" data-step="3">
+        <div class="step-label">3. Flash</div>
+        <button id="flash" class="flash" disabled>Flash</button>
+        <div id="progress" class="progress hidden">
+          <div class="progress-bar"><div class="progress-fill"></div></div>
+          <div class="progress-text"></div>
+        </div>
+        <div id="status" class="status"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

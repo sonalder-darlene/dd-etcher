@@ -1,0 +1,14 @@
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/WixTools/
+src-tauri/gen/
+
+# Editors
+.vscode/
+.idea/
+*.swp
