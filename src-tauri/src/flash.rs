@@ -23,18 +23,25 @@ pub async fn flash(
     app: AppHandle,
     image_path: String,
     drive_id: String,
+    drive_size_bytes: u64,
 ) -> Result<(), String> {
-    flash_inner(app, image_path, drive_id)
+    flash_inner(app, image_path, drive_id, drive_size_bytes)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
-async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Result<()> {
+async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive_size_bytes: u64) -> Result<()> {
     let image = Path::new(&image_path);
     if !image.is_file() {
         return Err(anyhow!("image not found: {image_path}"));
     }
     let total_bytes = std::fs::metadata(image)?.len();
+
+    if total_bytes > drive_size_bytes {
+        return Err(anyhow!(
+            "image is larger than the drive — aborting to prevent a partial write."
+        ));
+    }
 
     // Resolve the device path for the selected drive id. We intentionally
     // build the path ourselves rather than trusting the frontend, so the

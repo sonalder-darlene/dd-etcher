@@ -54,6 +54,7 @@ aboutRepo.addEventListener("click", () => invoke("open_repo"));
 // ---
 
 let selectedImage: string | null = null;
+let selectedImageSize: number | null = null;
 let selectedDrive: Drive | null = null;
 let drives: Drive[] = [];
 
@@ -77,7 +78,20 @@ function formatBytes(n: number): string {
 }
 
 function updateFlashEnabled() {
-  flashBtn.disabled = !(selectedImage && selectedDrive);
+  if (!selectedImage || !selectedDrive) {
+    flashBtn.disabled = true;
+    return;
+  }
+  if (selectedImageSize !== null && selectedImageSize > selectedDrive.size_bytes) {
+    flashBtn.disabled = true;
+    setStatus(
+      `Image (${formatBytes(selectedImageSize)}) is larger than the drive (${formatBytes(selectedDrive.size_bytes)}) — select a smaller image or a larger drive.`,
+      "error"
+    );
+    return;
+  }
+  flashBtn.disabled = false;
+  if (statusEl.classList.contains("error")) setStatus("");
 }
 
 function setStatus(text: string, kind: "" | "ok" | "error" = "") {
@@ -116,9 +130,14 @@ pickImageBtn.addEventListener("click", async () => {
   });
   if (typeof picked === "string") {
     selectedImage = picked;
+    selectedImageSize = null;
     const name = picked.split("/").pop() ?? picked;
     imageInfo.textContent = name;
     imageInfo.classList.remove("hidden");
+    try {
+      selectedImageSize = await invoke<number>("get_file_size", { path: picked });
+      imageInfo.textContent = `${name} • ${formatBytes(selectedImageSize)}`;
+    } catch (_) {}
     updateFlashEnabled();
   }
 });
@@ -155,6 +174,7 @@ flashBtn.addEventListener("click", async () => {
     await invoke("flash", {
       imagePath: selectedImage,
       driveId: selectedDrive.id,
+      driveSizeBytes: selectedDrive.size_bytes,
     });
     setStatus("Flash complete and verified ✓", "ok");
   } catch (e) {

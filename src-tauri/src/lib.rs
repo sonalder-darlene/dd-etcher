@@ -129,6 +129,13 @@ fn app_version() -> &'static str {
 }
 
 #[tauri::command]
+fn get_file_size(path: String) -> Result<u64, String> {
+    std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn open_repo() {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open")
@@ -153,6 +160,7 @@ pub fn run() {
             open_fda_settings,
             app_version,
             open_repo,
+            get_file_size,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
