@@ -1,6 +1,6 @@
 [package]
 name = "dd-etcher"
-version = "0.1.0"
+version = "0.1.1"
 description = "A minimal, native image flasher using dd"
 authors = ["dd-etcher contributors"]
 license = "GPL-3.0-only"
