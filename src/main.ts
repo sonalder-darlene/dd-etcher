@@ -174,7 +174,6 @@ flashBtn.addEventListener("click", async () => {
     await invoke("flash", {
       imagePath: selectedImage,
       driveId: selectedDrive.id,
-      driveSizeBytes: selectedDrive.size_bytes,
     });
     setStatus("Flash complete and verified ✓", "ok");
   } catch (e) {
@@ -190,11 +189,22 @@ flashBtn.addEventListener("click", async () => {
 
 listen<FlashProgress>("flash-progress", (event) => {
   const p = event.payload;
-  const pct = p.total_bytes > 0 ? Math.min(100, (p.bytes_written / p.total_bytes) * 100) : 0;
+  const ratio = p.total_bytes > 0 ? Math.min(1, p.bytes_written / p.total_bytes) : 0;
+
+  // Three phases occupy fixed slices of the bar so it never moves backwards:
+  // flashing 0–40%  •  hashing 40–70%  •  verifying 70–100%
+  let pct = 0;
+  if (p.phase === "flashing")   pct = ratio * 40;
+  else if (p.phase === "hashing")    pct = 40 + ratio * 30;
+  else if (p.phase === "verifying")  pct = 70 + ratio * 30;
+  else if (p.phase === "done")       pct = 100;
+
   progressFill.style.width = `${pct}%`;
   const rate = p.bytes_per_second > 0 ? ` • ${formatBytes(p.bytes_per_second)}/s` : "";
   progressText.textContent = `${p.phase} — ${formatBytes(p.bytes_written)} / ${formatBytes(p.total_bytes)}${rate}`;
+
   if (p.phase === "flashing" && p.bytes_written > 0) setStatus("Flashing…");
+  else if (p.phase === "hashing") setStatus("Hashing source image…");
   else if (p.phase === "verifying") setStatus("Verifying…");
 });
 

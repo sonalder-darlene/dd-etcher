@@ -1,11 +1,12 @@
 [package]
 name = "dd-etcher"
-version = "0.1.1"
+version = "0.2.0"
 description = "A minimal, native image flasher using dd"
 authors = ["dd-Etcher contributors"]
 license = "GPL-3.0-only"
+repository = "https://github.com/sonalder-darlene/dd-etcher"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 
 [lib]
 name = "dd_etcher_lib"
@@ -25,6 +26,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 thiserror = "2"
 libc = "0.2"
+zeroize = "1"
 
 [features]
 default = ["custom-protocol"]

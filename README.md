@@ -22,7 +22,7 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 - Verify flash integrity via SHA-256 checksum with live progress
 - Full Disk Access onboarding screen — blocks the UI and guides you through the one-time setup if FDA has not been granted yet
 - Built with Rust and Tauri + WKWebView
-- No telemetry, no network calls, no accounts, no BS
+- No telemetry, no background network calls, no accounts, no BS
 
 ## Architecture
 

@@ -79,10 +79,21 @@ pub fn privileged_flash(device: &str) {
 }
 
 fn is_safe_device(device: &str) -> bool {
-    if let Some(rest) = device.strip_prefix("/dev/disk") {
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
-    } else {
-        false
+    #[cfg(target_os = "macos")]
+    {
+        device
+            .strip_prefix("/dev/disk")
+            .map_or(false, |r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let name = device.strip_prefix("/dev/").unwrap_or("");
+        !name.is_empty()
+            && (name.starts_with("sd")
+                || name.starts_with("nvme")
+                || name.starts_with("mmcblk")
+                || name.starts_with("vd"))
+            && name.chars().all(|c| c.is_ascii_alphanumeric())
     }
 }
 
@@ -137,14 +148,11 @@ fn get_file_size(path: String) -> Result<u64, String> {
 
 #[tauri::command]
 fn open_repo() {
+    let url = env!("CARGO_PKG_REPOSITORY");
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open")
-        .arg("https://github.com/sonalder-darlene/dd-Etcher")
-        .spawn();
+    let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open")
-        .arg("https://github.com/sonalder-darlene/dd-Etcher")
-        .spawn();
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 use tauri::Manager as _;
@@ -164,7 +172,7 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
-            app.get_webview_window("main").unwrap().open_devtools();
+            if let Some(w) = app.get_webview_window("main") { w.open_devtools(); }
             Ok(())
         })
         .run(tauri::generate_context!())

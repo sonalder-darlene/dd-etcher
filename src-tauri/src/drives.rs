@@ -25,6 +25,23 @@ pub async fn list_drives() -> Result<Vec<Drive>, String> {
     }
 }
 
+/// Query the size of a single drive by ID. Used by the flash backend to
+/// validate the image size independently of the frontend-supplied value.
+pub fn query_drive_size(drive_id: &str) -> anyhow::Result<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::size(drive_id)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::size(drive_id)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!("Unsupported platform")
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::Drive;
@@ -73,6 +90,10 @@ mod macos {
         Ok(drives)
     }
 
+    pub fn size(id: &str) -> Result<u64> {
+        Ok(info(id)?.size_bytes)
+    }
+
     fn info(id: &str) -> Result<Drive> {
         let output = Command::new("diskutil")
             .args(["info", "-plist", id])
@@ -109,8 +130,7 @@ mod macos {
             .and_then(|v| v.as_boolean())
             .unwrap_or(true);
 
-        // Use the raw device for speed — /dev/rdiskN bypasses the buffer cache.
-        let device_path = format!("/dev/r{id}");
+        let device_path = format!("/dev/{id}");
 
         Ok(Drive {
             id: id.to_string(),
@@ -182,5 +202,14 @@ mod linux {
             });
         }
         Ok(drives)
+    }
+
+    pub fn size(drive_id: &str) -> Result<u64> {
+        let drives = list()?;
+        drives
+            .into_iter()
+            .find(|d| d.id == drive_id)
+            .map(|d| d.size_bytes)
+            .ok_or_else(|| anyhow::anyhow!("drive {drive_id} not found"))
     }
 }

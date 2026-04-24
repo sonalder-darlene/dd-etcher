@@ -3,6 +3,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
+use zeroize::Zeroizing;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,20 +24,22 @@ pub async fn flash(
     app: AppHandle,
     image_path: String,
     drive_id: String,
-    drive_size_bytes: u64,
 ) -> Result<(), String> {
-    flash_inner(app, image_path, drive_id, drive_size_bytes)
+    flash_inner(app, image_path, drive_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
-async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive_size_bytes: u64) -> Result<()> {
+async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Result<()> {
     let image = Path::new(&image_path);
     if !image.is_file() {
         return Err(anyhow!("image not found: {image_path}"));
     }
     let total_bytes = std::fs::metadata(image)?.len();
 
+    // Re-query drive size from the OS — do not trust the frontend-supplied value.
+    let drive_size_bytes = crate::drives::query_drive_size(&drive_id)
+        .context("could not determine drive size")?;
     if total_bytes > drive_size_bytes {
         return Err(anyhow!(
             "image is larger than the drive — aborting to prevent a partial write."
@@ -74,10 +77,17 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive
     flash_result?;
 
     // --- phase: verifying ---
-    // Hash the source image (our process has read access from the file dialog).
+    // Hash the source image with live progress events.
+    let _ = app.emit("flash-progress", FlashProgress {
+        bytes_written: 0,
+        total_bytes,
+        bytes_per_second: 0,
+        phase: "hashing",
+    });
     let image_hash = tokio::task::spawn_blocking({
         let path = image_path.clone();
-        move || sha256_file(&path, total_bytes)
+        let app2 = app.clone();
+        move || sha256_file(&path, total_bytes, app2)
     })
     .await??;
 
@@ -105,7 +115,7 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive
     // Use tokio::process so we can read stderr line-by-line for live progress
     // while the privileged helper hashes the device.
     let mut child = tokio::process::Command::new("/usr/bin/sudo")
-        .args(["-n", self_exe.to_str().unwrap(), "--privileged-sha256", &device_path, &total_bytes.to_string()])
+        .args(["-n", self_exe.to_string_lossy().as_ref(), "--privileged-sha256", &device_path, &total_bytes.to_string()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -113,14 +123,14 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, drive
 
     // Read progress lines from stderr and emit events.
     let stderr = child.stderr.take().unwrap();
+    use tokio::io::AsyncBufReadExt as _;
     let mut lines = tokio::io::BufReader::new(stderr);
     let mut line = String::new();
     let mut last_bytes = 0u64;
     let mut last_tick = std::time::Instant::now();
     loop {
         line.clear();
-        use tokio::io::AsyncBufReadExt as _;
-        if tokio::io::AsyncBufReadExt::read_line(&mut lines, &mut line).await? == 0 {
+        if lines.read_line(&mut line).await? == 0 {
             break;
         }
         if let Ok(bytes) = line.trim().parse::<u64>() {
@@ -218,6 +228,9 @@ fn authenticate_sudo() -> Result<()> {
         return Err(anyhow!("Authentication cancelled."));
     }
 
+    // Wrap the password in Zeroizing so it is wiped from memory on drop.
+    let password = Zeroizing::new(dialog.stdout);
+
     // sudo -S reads the password from stdin; -p "" suppresses its own prompt;
     // -v just validates and caches the credential without running a command.
     let mut sudo = Command::new("/usr/bin/sudo")
@@ -228,7 +241,7 @@ fn authenticate_sudo() -> Result<()> {
         .context("failed to spawn sudo")?;
 
     let mut stdin = sudo.stdin.take().unwrap();
-    stdin.write_all(&dialog.stdout).context("sending password")?;
+    stdin.write_all(&password).context("sending password")?;
     stdin.write_all(b"\n").ok();
     drop(stdin);
 
@@ -260,7 +273,7 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
 
     #[cfg(target_os = "macos")]
     let mut child = Command::new("/usr/bin/sudo")
-        .args(["-n", self_exe.to_str().unwrap(), "--privileged-flash", device])
+        .args(["-n", self_exe.to_string_lossy().as_ref(), "--privileged-flash", device])
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -268,7 +281,7 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
 
     #[cfg(target_os = "linux")]
     let mut child = Command::new("pkexec")
-        .args([self_exe.to_str().unwrap(), "--privileged-flash", device])
+        .args([self_exe.to_string_lossy().as_ref(), "--privileged-flash", device])
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -296,7 +309,8 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
 
     if !status.success() {
         let msg = String::from_utf8_lossy(&stderr_bytes);
-        if msg.contains("Operation not permitted") || msg.contains("permission denied") {
+        let msg_lower = msg.to_lowercase();
+        if msg_lower.contains("operation not permitted") || msg_lower.contains("permission denied") {
             return Err(anyhow!(
                 "Permission denied.\n\
                  Go to System Settings → Privacy & Security → Full Disk Access\n\
@@ -343,17 +357,34 @@ fn spawn_progress_ticker(
     })
 }
 
-fn sha256_file(path: &str, _total: u64) -> Result<[u8; 32]> {
+fn sha256_file(path: &str, total_bytes: u64, app: AppHandle) -> Result<[u8; 32]> {
     let file = File::open(path).with_context(|| format!("opening {path}"))?;
     let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut bytes_read = 0u64;
+    let mut last_tick = std::time::Instant::now();
+    let mut last_bytes = 0u64;
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        bytes_read += n as u64;
+        let now = std::time::Instant::now();
+        if now.duration_since(last_tick).as_millis() >= 200 {
+            let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
+            let rate = ((bytes_read - last_bytes) as f64 / dt) as u64;
+            last_bytes = bytes_read;
+            last_tick = now;
+            let _ = app.emit("flash-progress", FlashProgress {
+                bytes_written: bytes_read,
+                total_bytes,
+                bytes_per_second: rate,
+                phase: "hashing",
+            });
+        }
     }
     Ok(hasher.finalize().into())
 }
