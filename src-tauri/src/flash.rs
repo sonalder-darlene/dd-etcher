@@ -11,6 +11,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+pub struct FlashState {
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl Default for FlashState {
+    fn default() -> Self {
+        Self { cancel: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+#[tauri::command]
+pub fn cancel_flash(state: tauri::State<'_, FlashState>) {
+    state.cancel.store(true, Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FlashProgress {
     pub bytes_written: u64,
@@ -24,13 +39,16 @@ pub async fn flash(
     app: AppHandle,
     image_path: String,
     drive_id: String,
+    state: tauri::State<'_, FlashState>,
 ) -> Result<(), String> {
-    flash_inner(app, image_path, drive_id)
+    let cancel = state.cancel.clone();
+    flash_inner(app, image_path, drive_id, cancel)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
-async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Result<()> {
+async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cancel: Arc<AtomicBool>) -> Result<()> {
+    cancel.store(false, Ordering::Relaxed);
     let image = Path::new(&image_path);
     if !image.is_file() {
         return Err(anyhow!("image not found: {image_path}"));
@@ -58,6 +76,7 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Re
         app.clone(),
         progress.clone(),
         stop.clone(),
+        cancel.clone(),
         total_bytes,
         "flashing",
     );
@@ -67,13 +86,18 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Re
         let device_path = device_path.clone();
         let drive_id_c = drive_id.clone();
         let progress = progress.clone();
-        move || run_dd(&image_path, &device_path, &drive_id_c, total_bytes, progress)
+        let cancel = cancel.clone();
+        move || run_dd(&image_path, &device_path, &drive_id_c, total_bytes, progress, cancel)
     })
     .await
     .context("flash task panicked")?;
 
     stop.store(true, Ordering::Relaxed);
     let _ = ticker.await;
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(anyhow!("cancelled"));
+    }
     flash_result?;
 
     // --- phase: verifying ---
@@ -177,7 +201,19 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String) -> Re
         },
     );
 
+    notify_complete();
     Ok(())
+}
+
+fn notify_complete() {
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("osascript")
+        .args(["-e", "display notification \"Your drive is ready to use.\" with title \"dd-Etcher\" subtitle \"Flash complete ✓\""])
+        .spawn();
+    #[cfg(target_os = "linux")]
+    let _ = Command::new("notify-send")
+        .args(["dd-Etcher", "Flash complete — your drive is ready."])
+        .spawn();
 }
 
 fn resolve_device_path(drive_id: &str) -> Result<String> {
@@ -257,7 +293,7 @@ fn authenticate_sudo() -> Result<()> {
 /// Auth is separated from execution: we collect the password once via a
 /// native dialog, cache it with `sudo -v`, then use `sudo -n` for both
 /// the flash and verify steps (no repeated prompts).
-fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<AtomicU64>) -> Result<()> {
+fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<AtomicU64>, cancel: Arc<AtomicBool>) -> Result<()> {
     #[cfg(target_os = "macos")]
     authenticate_sudo()?;
 
@@ -292,6 +328,7 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
         let mut src = File::open(image).context("opening image")?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         loop {
+            if cancel.load(Ordering::Relaxed) { break; }
             let n = src.read(&mut buf).context("reading image")?;
             if n == 0 { break; }
             stdin.write_all(&buf[..n]).context("writing to helper")?;
@@ -300,12 +337,20 @@ fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<
         Ok(())
     };
 
+    if cancel.load(Ordering::Relaxed) {
+        let _ = child.kill();
+    }
+
     let stderr_bytes = child.stderr.take()
         .map(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok(); b })
         .unwrap_or_default();
 
     let status = child.wait().context("waiting for helper")?;
     pipe_result?;
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(anyhow!("cancelled"));
+    }
 
     if !status.success() {
         let msg = String::from_utf8_lossy(&stderr_bytes);
@@ -329,6 +374,7 @@ fn spawn_progress_ticker(
     app: AppHandle,
     progress: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
     total: u64,
     phase: &'static str,
 ) -> tokio::task::JoinHandle<()> {
@@ -336,12 +382,29 @@ fn spawn_progress_ticker(
         let start = Instant::now();
         let mut last_bytes = 0u64;
         let mut last_tick = start;
+        let mut stall_since: Option<Instant> = None;
         while !stop.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let now = Instant::now();
             let bytes = progress.load(Ordering::Relaxed);
             let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
             let rate = ((bytes.saturating_sub(last_bytes)) as f64 / dt) as u64;
+
+            // Stall detection: if bytes have started but not moved for 120s, auto-cancel.
+            if bytes > 0 && bytes == last_bytes {
+                match stall_since {
+                    None => stall_since = Some(now),
+                    Some(t) if now.duration_since(t).as_secs() >= 120 => {
+                        cancel.store(true, Ordering::Relaxed);
+                        let _ = app.emit("flash-stalled", ());
+                        break;
+                    }
+                    _ => {}
+                }
+            } else {
+                stall_since = None;
+            }
+
             last_bytes = bytes;
             last_tick = now;
             let _ = app.emit(

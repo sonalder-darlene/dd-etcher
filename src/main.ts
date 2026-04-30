@@ -64,6 +64,7 @@ const driveSelect = $<HTMLSelectElement>("drive-select");
 const refreshBtn = $<HTMLButtonElement>("refresh-drives");
 const driveInfo = $<HTMLDivElement>("drive-info");
 const flashBtn = $<HTMLButtonElement>("flash");
+const cancelFlashBtn = $<HTMLButtonElement>("cancel-flash");
 const progressEl = $<HTMLDivElement>("progress");
 const progressFill = progressEl.querySelector(".progress-fill") as HTMLDivElement;
 const progressText = progressEl.querySelector(".progress-text") as HTMLDivElement;
@@ -156,6 +157,17 @@ driveSelect.addEventListener("change", () => {
 
 refreshBtn.addEventListener("click", refreshDrives);
 
+cancelFlashBtn.addEventListener("click", async () => {
+  const confirmed = confirm(
+    "Cancel the flash?\n\nThe drive will be left in a corrupted state and must be reflashed before use."
+  );
+  if (confirmed) await invoke("cancel_flash");
+});
+
+listen("flash-stalled", () => {
+  setStatus("Drive stalled for 2 minutes — flash cancelled. Check the drive and try again.", "error");
+});
+
 flashBtn.addEventListener("click", async () => {
   if (!selectedImage || !selectedDrive) return;
   const confirmed = confirm(
@@ -167,6 +179,7 @@ flashBtn.addEventListener("click", async () => {
   pickImageBtn.disabled = true;
   refreshBtn.disabled = true;
   driveSelect.disabled = true;
+  cancelFlashBtn.classList.remove("hidden");
   progressEl.classList.remove("hidden");
   setStatus("Requesting admin permission…");
 
@@ -177,12 +190,18 @@ flashBtn.addEventListener("click", async () => {
     });
     setStatus("Flash complete and verified ✓", "ok");
   } catch (e) {
-    setStatus(`Flash failed: ${e}`, "error");
+    const msg = String(e);
+    if (msg === "cancelled") {
+      setStatus("Flash cancelled — the drive is not usable, flash again before use.", "error");
+    } else {
+      setStatus(`Flash failed: ${e}`, "error");
+    }
   } finally {
     flashBtn.disabled = false;
     pickImageBtn.disabled = false;
     refreshBtn.disabled = false;
     driveSelect.disabled = false;
+    cancelFlashBtn.classList.add("hidden");
     updateFlashEnabled();
   }
 });

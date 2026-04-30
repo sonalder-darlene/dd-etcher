@@ -161,9 +161,11 @@ use tauri::Manager as _;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(flash::FlashState::default())
         .invoke_handler(tauri::generate_handler![
             drives::list_drives,
             flash::flash,
+            flash::cancel_flash,
             check_fda,
             open_fda_settings,
             app_version,

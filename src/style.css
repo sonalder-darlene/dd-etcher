@@ -78,6 +78,17 @@ button.flash {
 }
 button.flash:hover:not(:disabled) { background: var(--accent-hover); }
 
+button.cancel-flash {
+  font-size: 12px;
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(255, 107, 107, 0.08);
+  padding: 8px 12px;
+}
+button.cancel-flash:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.18);
+}
+
 .drive-row { display: flex; gap: 8px; }
 .drive-row select { flex: 1; }
 .refresh { width: 42px; padding: 10px 0; font-size: 16px; }
