@@ -66,8 +66,8 @@ mod macos {
             ));
         }
 
-        let plist: plist::Value = plist::from_bytes(&output.stdout)
-            .context("failed to parse diskutil list plist")?;
+        let plist: plist::Value =
+            plist::from_bytes(&output.stdout).context("failed to parse diskutil list plist")?;
 
         let disk_ids = plist
             .as_dictionary()
@@ -179,7 +179,11 @@ mod linux {
             if !removable {
                 continue;
             }
-            let name = dev.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = dev
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let path = dev
                 .get("path")
                 .and_then(|v| v.as_str())

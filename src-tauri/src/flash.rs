@@ -3,13 +3,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use zeroize::Zeroizing;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use zeroize::Zeroizing;
 
 pub struct FlashState {
     pub cancel: Arc<AtomicBool>,
@@ -68,7 +68,12 @@ pub async fn flash(
     result.map_err(|e| format!("{e:#}"))
 }
 
-async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cancel: Arc<AtomicBool>) -> Result<()> {
+async fn flash_inner(
+    app: AppHandle,
+    image_path: String,
+    drive_id: String,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     cancel.store(false, Ordering::Relaxed);
     let image = Path::new(&image_path);
     if !image.is_file() {
@@ -77,8 +82,8 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
     let total_bytes = std::fs::metadata(image)?.len();
 
     // Re-query drive size from the OS — do not trust the frontend-supplied value.
-    let drive_size_bytes = crate::drives::query_drive_size(&drive_id)
-        .context("could not determine drive size")?;
+    let drive_size_bytes =
+        crate::drives::query_drive_size(&drive_id).context("could not determine drive size")?;
     if total_bytes > drive_size_bytes {
         return Err(anyhow!(
             "image is larger than the drive — aborting to prevent a partial write."
@@ -123,12 +128,15 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
 
     // --- phase: verifying ---
     // Hash the source image with live progress events.
-    let _ = app.emit("flash-progress", FlashProgress {
-        bytes_written: 0,
-        total_bytes,
-        bytes_per_second: 0,
-        phase: "hashing",
-    });
+    let _ = app.emit(
+        "flash-progress",
+        FlashProgress {
+            bytes_written: 0,
+            total_bytes,
+            bytes_per_second: 0,
+            phase: "hashing",
+        },
+    );
     let image_hash = tokio::task::spawn_blocking({
         let path = image_path.clone();
         let app2 = app.clone();
@@ -149,19 +157,28 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
 
     // Hash the device via the privileged helper. sudo -n reuses the cached
     // credential from the flash step — no second password prompt.
-    let _ = app.emit("flash-progress", FlashProgress {
-        bytes_written: 0,
-        total_bytes,
-        bytes_per_second: 0,
-        phase: "verifying",
-    });
+    let _ = app.emit(
+        "flash-progress",
+        FlashProgress {
+            bytes_written: 0,
+            total_bytes,
+            bytes_per_second: 0,
+            phase: "verifying",
+        },
+    );
 
     let self_exe = std::env::current_exe().context("cannot find own executable")?;
 
     // Use tokio::process so we can read stderr line-by-line for live progress
     // while the privileged helper hashes the device.
     let mut child = tokio::process::Command::new("/usr/bin/sudo")
-        .args(["-n", self_exe.to_string_lossy().as_ref(), "--privileged-sha256", &device_path, &total_bytes.to_string()])
+        .args([
+            "-n",
+            self_exe.to_string_lossy().as_ref(),
+            "--privileged-sha256",
+            &device_path,
+            &total_bytes.to_string(),
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -210,12 +227,15 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
             let rate = ((bytes.saturating_sub(last_bytes)) as f64 / dt) as u64;
             last_bytes = bytes;
             last_tick = now;
-            let _ = app.emit("flash-progress", FlashProgress {
-                bytes_written: bytes,
-                total_bytes,
-                bytes_per_second: rate,
-                phase: "verifying",
-            });
+            let _ = app.emit(
+                "flash-progress",
+                FlashProgress {
+                    bytes_written: bytes,
+                    total_bytes,
+                    bytes_per_second: rate,
+                    phase: "verifying",
+                },
+            );
         }
     }
 
@@ -228,7 +248,9 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
     let status = child.wait().await.context("waiting for sha256 helper")?;
 
     if !status.success() {
-        return Err(anyhow!("verification read failed: helper exited with {status}"));
+        return Err(anyhow!(
+            "verification read failed: helper exited with {status}"
+        ));
     }
 
     let device_hash_hex = String::from_utf8_lossy(&stdout_buf).trim().to_string();
@@ -266,9 +288,11 @@ fn notify_complete() {
 fn resolve_device_path(drive_id: &str) -> Result<String> {
     // Reject anything that isn't plain alphanumerics so we can't be tricked
     // into targeting arbitrary paths through the admin prompt.
-    if !drive_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    // `all` is vacuously true on an empty string, which would build "/dev/".
+    if drive_id.is_empty()
+        || !drive_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(anyhow!("invalid drive id: {drive_id}"));
     }
@@ -362,7 +386,12 @@ fn run_dd(
 
     #[cfg(target_os = "macos")]
     let mut child = Command::new("/usr/bin/sudo")
-        .args(["-n", self_exe.to_string_lossy().as_ref(), "--privileged-flash", device])
+        .args([
+            "-n",
+            self_exe.to_string_lossy().as_ref(),
+            "--privileged-flash",
+            device,
+        ])
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -370,7 +399,11 @@ fn run_dd(
 
     #[cfg(target_os = "linux")]
     let mut child = Command::new("pkexec")
-        .args([self_exe.to_string_lossy().as_ref(), "--privileged-flash", device])
+        .args([
+            self_exe.to_string_lossy().as_ref(),
+            "--privileged-flash",
+            device,
+        ])
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -381,9 +414,13 @@ fn run_dd(
         let mut src = File::open(image).context("opening image")?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         loop {
-            if cancel.load(Ordering::Relaxed) { break; }
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             let n = src.read(&mut buf).context("reading image")?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             stdin.write_all(&buf[..n]).context("writing to helper")?;
             progress.fetch_add(n as u64, Ordering::Relaxed);
         }
@@ -394,8 +431,14 @@ fn run_dd(
         let _ = child.kill();
     }
 
-    let stderr_bytes = child.stderr.take()
-        .map(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok(); b })
+    let stderr_bytes = child
+        .stderr
+        .take()
+        .map(|mut r| {
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(&mut r, &mut b).ok();
+            b
+        })
         .unwrap_or_default();
 
     let status = child.wait().context("waiting for helper")?;
@@ -408,7 +451,8 @@ fn run_dd(
     if !status.success() {
         let msg = String::from_utf8_lossy(&stderr_bytes);
         let msg_lower = msg.to_lowercase();
-        if msg_lower.contains("operation not permitted") || msg_lower.contains("permission denied") {
+        if msg_lower.contains("operation not permitted") || msg_lower.contains("permission denied")
+        {
             return Err(anyhow!(
                 "Permission denied.\n\
                  Go to System Settings → Privacy & Security → Full Disk Access\n\
@@ -417,7 +461,11 @@ fn run_dd(
         }
         return Err(anyhow!(
             "helper exited with {status}{}",
-            if msg.trim().is_empty() { String::new() } else { format!(": {}", msg.trim()) }
+            if msg.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", msg.trim())
+            }
         ));
     }
     Ok(())
@@ -502,15 +550,55 @@ fn sha256_file(
             let rate = ((bytes_read - last_bytes) as f64 / dt) as u64;
             last_bytes = bytes_read;
             last_tick = now;
-            let _ = app.emit("flash-progress", FlashProgress {
-                bytes_written: bytes_read,
-                total_bytes,
-                bytes_per_second: rate,
-                phase: "hashing",
-            });
+            let _ = app.emit(
+                "flash-progress",
+                FlashProgress {
+                    bytes_written: bytes_read,
+                    total_bytes,
+                    bytes_per_second: rate,
+                    phase: "hashing",
+                },
+            );
         }
     }
     Ok(hasher.finalize().into())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::resolve_device_path;
 
+    /// The frontend supplies a drive id, never a path. This is the charset
+    /// gate that stands between an IPC caller and an arbitrary target; the
+    /// shape check in `is_safe_device` is the second, independent gate.
+    #[test]
+    fn rejects_anything_that_is_not_a_bare_id() {
+        for bad in [
+            "",
+            "..",
+            "../../dev/disk0",
+            "disk2 disk3",
+            "disk2;reboot",
+            "disk2/../disk0",
+            "disk2\n",
+            "/dev/disk2", // already a path — ids are bare
+        ] {
+            assert!(resolve_device_path(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn builds_the_path_itself() {
+        assert_eq!(resolve_device_path("disk2").unwrap(), "/dev/disk2");
+        assert_eq!(resolve_device_path("nvme0n1").unwrap(), "/dev/nvme0n1");
+    }
+
+    /// An empty id passes nothing useful downstream, and a partition id is
+    /// charset-clean here but caught by `is_safe_device` in the helper. This
+    /// documents that the two checks are deliberately not the same check.
+    #[test]
+    fn charset_gate_is_not_the_shape_gate() {
+        assert_eq!(resolve_device_path("disk2s1").unwrap(), "/dev/disk2s1");
+        assert!(!crate::is_safe_device("/dev/disk2s1"));
+    }
+}

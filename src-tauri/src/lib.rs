@@ -41,7 +41,10 @@ pub fn privileged_sha256(device: &str, limit: u64) {
     }
 
     let hash = hasher.finalize();
-    println!("{}", hash.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!(
+        "{}",
+        hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
 }
 
 /// Privileged helper entry point — called by main() when invoked via sudo.
@@ -174,9 +177,65 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
-            if let Some(w) = app.get_webview_window("main") { w.open_devtools(); }
+            if let Some(w) = app.get_webview_window("main") {
+                w.open_devtools();
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running dd-Etcher");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_device;
+
+    /// The allowlist guarding the privileged helper. A false positive here
+    /// writes to the wrong device, so the interesting cases are the near
+    /// misses, not the happy path.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_accepts_only_whole_disks() {
+        for ok in ["/dev/disk0", "/dev/disk2", "/dev/disk10"] {
+            assert!(is_safe_device(ok), "should accept {ok}");
+        }
+        for bad in [
+            "",
+            "/dev/disk",          // no number
+            "/dev/disk2s1",       // a partition, not the whole disk
+            "/dev/rdisk2",        // raw device — we never write to it
+            "/dev/disk2 ",        // trailing space
+            "/dev/disk2;reboot",  // shell metacharacters
+            "/dev/../etc/passwd", // traversal
+            "/dev/sda",           // Linux name on macOS
+            "disk2",              // not absolute
+        ] {
+            assert!(!is_safe_device(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_accepts_known_block_device_names() {
+        for ok in [
+            "/dev/sda",
+            "/dev/sdb1",
+            "/dev/nvme0n1",
+            "/dev/mmcblk0",
+            "/dev/vda",
+        ] {
+            assert!(is_safe_device(ok), "should accept {ok}");
+        }
+        for bad in [
+            "",
+            "/dev/",
+            "/dev/loop0", // not a removable target
+            "/dev/sda;reboot",
+            "/dev/../etc/passwd",
+            "/dev/disk2", // macOS name on Linux
+            "sda",
+        ] {
+            assert!(!is_safe_device(bad), "should reject {bad:?}");
+        }
+    }
 }
