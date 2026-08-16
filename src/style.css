@@ -15,7 +15,7 @@
   --border:        #252530;
   --border-bright: #363644;
   --text:          #e0e0e6;
-  --text-mid:      #72728a;
+  --text-mid:      #9090a8;
   --text-dim:      #30303c;
   --accent:        #a8e04a;
   --accent-glow:   rgba(168, 224, 74, 0.18);
@@ -41,7 +41,7 @@ html[data-theme="light"] {
   --border:        #d0d0c8;
   --border-bright: #b4b4ac;
   --text:          #141418;
-  --text-mid:      #646460;
+  --text-mid:      #56564f;
   --text-dim:      #c0c0b8;
   --accent:        #6fa020;
   --accent-glow:   rgba(111, 160, 32, 0.18);
@@ -762,7 +762,7 @@ button:disabled { opacity: 0.30; cursor: not-allowed; }
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   font-size: 12px;
   min-height: 16px;
-  color: var(--text-dim);
+  color: var(--text-mid);
   line-height: 1.5;
   transition: color 150ms;
 }

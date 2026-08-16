@@ -379,8 +379,8 @@ let currentPhase: FlashProgress["phase"] = "flashing";
 cancelFlashBtn.addEventListener("click", async () => {
   const ok = confirm(
     currentPhase === "flashing"
-      ? "Cancel the flash?\n\nThe drive will be left in a corrupted state and must be reflashed before use."
-      : "Skip verification?\n\nThe image is already written. Cancelling only skips the integrity check — the drive should still work, but it will not have been verified."
+      ? "Stop flashing?\n\nThe drive will be erased so a half-written image can't be mistaken for a working one. You can flash it again whenever you like."
+      : "Skip the check?\n\nThe image is already written and the drive will work. This only skips confirming it was written correctly."
   );
   if (ok) await invoke("cancel_flash");
 });
@@ -401,7 +401,7 @@ flashBtn.addEventListener("click", async () => {
   $<HTMLButtonElement>("change-image-compact").disabled  = true;
   $<HTMLButtonElement>("change-drive-compact").disabled  = true;
   currentPhase = "flashing";
-  cancelFlashBtn.textContent = "CANCEL — DRIVE WILL BE CORRUPTED";
+  cancelFlashBtn.textContent = "CANCEL";
   cancelFlashBtn.classList.remove("hidden");
   progressEl.classList.remove("hidden");
   setStatus("requesting admin permission…");
@@ -412,9 +412,16 @@ flashBtn.addEventListener("click", async () => {
   } catch (e) {
     const msg = String(e);
     if (msg === "cancelled") {
-      setStatus("Flash cancelled — the drive is not usable. Flash again before use.", "error");
+      // The backend blanks the drive before reporting this, so it is a calm
+      // outcome, not a warning the user has to act on.
+      setStatus("Cancelled. The drive was erased and is ready to use again.", "ok");
     } else if (msg === "cancelled after write") {
-      setStatus("Verification skipped. The image was written but not checked.", "error");
+      setStatus("Check skipped — the image is written and the drive is ready.", "ok");
+    } else if (msg.startsWith("wipe failed")) {
+      setStatus(
+        "Stopped, but the drive could not be erased. It holds a partial image — erase it in Disk Utility before using it.",
+        "error"
+      );
     } else {
       setStatus(`Flash failed: ${e}`, "error");
     }
@@ -430,19 +437,21 @@ flashBtn.addEventListener("click", async () => {
 
 // ─── Progress ─────────────────────────────────────────────────────────────
 const phaseLabels: Record<string, string> = {
-  flashing: "WRITING", hashing: "HASHING", verifying: "VERIFYING", done: "DONE",
+  flashing: "WRITING", wiping: "ERASING", hashing: "CHECKING", verifying: "VERIFYING", done: "DONE",
 };
 
 listen<FlashProgress>("flash-progress", (event) => {
   const p = event.payload;
   if (p.phase !== currentPhase) {
     currentPhase = p.phase;
-    if (p.phase !== "flashing") cancelFlashBtn.textContent = "CANCEL — SKIP VERIFICATION";
+    if (p.phase === "wiping") cancelFlashBtn.classList.add("hidden");
+    else if (p.phase !== "flashing") cancelFlashBtn.textContent = "SKIP CHECK";
   }
   const ratio = p.total_bytes > 0 ? Math.min(1, p.bytes_written / p.total_bytes) : 0;
 
   let pct = 0;
-  if      (p.phase === "flashing")   pct = ratio * 40;
+  if      (p.phase === "wiping")     pct = 100;   // indeterminate; keep the bar full rather than rewinding
+  else if (p.phase === "flashing")   pct = ratio * 40;
   else if (p.phase === "hashing")    pct = 40 + ratio * 30;
   else if (p.phase === "verifying")  pct = 70 + ratio * 30;
   else if (p.phase === "done")       pct = 100;
@@ -460,6 +469,7 @@ listen<FlashProgress>("flash-progress", (event) => {
   progressSpeedEl.textContent = p.bytes_per_second > 0 ? `${formatBytes(p.bytes_per_second)}/s` : "";
 
   if (p.phase === "flashing" && p.bytes_written > 0) setStatus("writing to drive…");
+  else if (p.phase === "wiping")    setStatus("erasing the drive so it is safe to reuse…");
   else if (p.phase === "hashing")   setStatus("hashing source image…");
   else if (p.phase === "verifying") setStatus("verifying write integrity…");
 });

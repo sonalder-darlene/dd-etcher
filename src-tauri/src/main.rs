@@ -9,6 +9,10 @@ fn main() {
             dd_etcher_lib::privileged_flash(&args[2]);
             return;
         }
+        Some("--privileged-wipe") if args.len() == 3 => {
+            dd_etcher_lib::privileged_wipe(&args[2]);
+            return;
+        }
         Some("--privileged-sha256") if args.len() == 4 => {
             let limit: u64 = args[3].parse().unwrap_or(0);
             dd_etcher_lib::privileged_sha256(&args[2], limit);

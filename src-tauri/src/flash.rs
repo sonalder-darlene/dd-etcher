@@ -121,7 +121,42 @@ async fn flash_inner(
     stop.store(true, Ordering::Relaxed);
     let _ = ticker.await;
 
-    if cancel.load(Ordering::Relaxed) {
+    // Any abort after bytes have landed leaves a drive that still mounts and
+    // still looks bootable. Blank it before handing control back, so the user
+    // ends up with an empty drive rather than a convincing broken one. Covers
+    // cancel, the stall watchdog (which sets the same flag), and a dd failure.
+    let aborted = cancel.load(Ordering::Relaxed);
+    if (aborted || flash_result.is_err()) && progress.load(Ordering::Relaxed) > 0 {
+        let _ = app.emit(
+            "flash-progress",
+            FlashProgress {
+                bytes_written: 0,
+                total_bytes,
+                bytes_per_second: 0,
+                phase: "wiping",
+            },
+        );
+        let wiped = tokio::task::spawn_blocking({
+            let device_path = device_path.clone();
+            move || wipe_device(&device_path)
+        })
+        .await
+        .context("wipe task panicked")?;
+
+        let reason = if aborted {
+            "cancelled".to_string()
+        } else {
+            format!("{:#}", flash_result.unwrap_err())
+        };
+        return Err(match wiped {
+            Ok(()) => anyhow!("{reason}"),
+            // Never let a failed wipe pass as a clean abort — the drive really
+            // does hold a partial image at this point and the user must know.
+            Err(e) => anyhow!("wipe failed after {reason}: {e:#}"),
+        });
+    }
+
+    if aborted {
         return Err(anyhow!("cancelled"));
     }
     flash_result?;
@@ -465,6 +500,45 @@ fn run_dd(
                 String::new()
             } else {
                 format!(": {}", msg.trim())
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Ask the privileged helper to blank a partially written device. Reuses the
+/// sudo credential cached by the flash step, so there is no second prompt.
+fn wipe_device(device_path: &str) -> Result<()> {
+    let self_exe = std::env::current_exe().context("cannot find own executable")?;
+
+    #[cfg(target_os = "macos")]
+    let output = Command::new("/usr/bin/sudo")
+        .args([
+            "-n",
+            self_exe.to_string_lossy().as_ref(),
+            "--privileged-wipe",
+            device_path,
+        ])
+        .output();
+
+    #[cfg(target_os = "linux")]
+    let output = Command::new("pkexec")
+        .args([
+            self_exe.to_string_lossy().as_ref(),
+            "--privileged-wipe",
+            device_path,
+        ])
+        .output();
+
+    let output = output.context("failed to spawn the wipe helper")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "{}",
+            if msg.trim().is_empty() {
+                format!("helper exited with {}", output.status)
+            } else {
+                msg.trim().to_string()
             }
         ));
     }
