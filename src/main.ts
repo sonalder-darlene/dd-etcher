@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Drive, FlashProgress } from "./types";
 
 document.documentElement.setAttribute("data-theme", localStorage.getItem("theme") ?? "dark");
@@ -76,6 +77,13 @@ const progressSpeedEl   = $<HTMLSpanElement>("progress-speed");
 const statusEl          = $<HTMLDivElement>("status");
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
+function span(cls: string, text: string): HTMLSpanElement {
+  const el = document.createElement("span");
+  el.className = cls;
+  el.textContent = text;
+  return el;
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -179,8 +187,11 @@ function updateCompactImage() {
   const basename = dotIdx !== -1 ? filename.slice(0, dotIdx) : filename;
   const { val, unit } = getSizeProps(selectedImageSize);
   // e.g. "ubuntu-22.04  .ISO  · 6.8 GB"
-  imageCompactText.innerHTML =
-    `${basename}<span class="compact-accent">${ext}</span> <span class="compact-muted">· ${formatSizeNum(val)} ${unit}</span>`;
+  imageCompactText.replaceChildren(
+    span("", basename),
+    span("compact-accent", ext),
+    span("compact-muted", ` · ${formatSizeNum(val)} ${unit}`),
+  );
 }
 
 function updateFlashEnabled() {
@@ -195,17 +206,26 @@ function updateFlashEnabled() {
 }
 
 // ─── Image picker ─────────────────────────────────────────────────────────
+const IMAGE_EXTS = ["img", "iso", "dmg", "bin", "raw"];
+
+function isImagePath(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTS.includes(ext);
+}
+
 async function openImagePicker() {
   const picked = await open({
     multiple: false,
     directory: false,
     filters: [
-      { name: "Disk images", extensions: ["img", "iso", "dmg", "bin", "raw"] },
+      { name: "Disk images", extensions: IMAGE_EXTS },
       { name: "All files", extensions: ["*"] },
     ],
   });
-  if (typeof picked !== "string") return;
+  if (typeof picked === "string") await applyImage(picked);
+}
 
+async function applyImage(picked: string) {
   selectedImage     = picked;
   selectedImageSize = null;
 
@@ -250,7 +270,7 @@ async function openImagePicker() {
     imageActive.classList.remove("hidden", "entering");
     void imageActive.offsetWidth;
     imageActive.classList.add("entering");
-    $("step-image").classList.add("step--done");
+    $("step-image").classList.add("step--done", "step--compact");
     pingNum("step-image");
     revealStep("step-drive", 100);
     // Refresh drives when step 02 first appears
@@ -275,6 +295,56 @@ $<HTMLButtonElement>("pick-image").addEventListener("click", openImagePicker);
 $<HTMLButtonElement>("change-image").addEventListener("click", openImagePicker);
 $<HTMLButtonElement>("change-image-compact").addEventListener("click", openImagePicker);
 
+// ─── Drag and drop ────────────────────────────────────────────────────────
+const dropOverlay = $<HTMLDivElement>("drop-overlay");
+const dropGlyph   = $<HTMLDivElement>("drop-glyph");
+const dropTitle   = $<HTMLDivElement>("drop-title");
+const dropSub     = $<HTMLDivElement>("drop-sub");
+
+let flashing = false;
+
+function showDrop(paths: string[]) {
+  const path = paths[0];
+  const many = paths.length > 1;
+  const ok   = !many && path !== undefined && isImagePath(path);
+
+  dropOverlay.classList.toggle("drop-overlay--reject", !ok);
+  dropGlyph.textContent = ok ? "↓" : "✕";
+  if (ok) {
+    dropTitle.textContent = "DROP TO LOAD";
+    dropSub.textContent   = path.split("/").pop() ?? "";
+  } else if (many) {
+    dropTitle.textContent = "ONE IMAGE AT A TIME";
+    dropSub.textContent   = `${paths.length} files`;
+  } else {
+    dropTitle.textContent = "NOT A DISK IMAGE";
+    dropSub.textContent   = IMAGE_EXTS.map((e) => `.${e}`).join("  ");
+  }
+  dropOverlay.classList.remove("hidden");
+}
+
+function hideDrop() {
+  dropOverlay.classList.add("hidden");
+}
+
+getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+  // Never swap the image out from under a running flash.
+  if (flashing) return;
+  if (payload.type === "enter") {
+    showDrop(payload.paths);
+  } else if (payload.type === "leave") {
+    hideDrop();
+  } else if (payload.type === "drop") {
+    hideDrop();
+    const path = payload.paths[0];
+    if (payload.paths.length === 1 && path !== undefined && isImagePath(path)) {
+      await applyImage(path);
+    } else {
+      setStatus("That is not a disk image — expected .img, .iso, .dmg, .bin or .raw.", "error");
+    }
+  }
+});
+
 // ─── Drives ───────────────────────────────────────────────────────────────
 async function refreshDrives(silent = false) {
   try {
@@ -292,11 +362,11 @@ async function refreshDrives(silent = false) {
         li.className = "drive-option";
         li.style.setProperty("--i", String(i));
         li.setAttribute("role", "option");
-        li.innerHTML = `
-          <span class="drive-opt-name">${d.name}</span>
-          <span class="drive-opt-size">${formatBytes(d.size_bytes)}</span>
-          <span class="drive-opt-meta">${d.device_path}${d.removable ? " · removable" : ""}</span>
-        `;
+        li.append(
+          span("drive-opt-name", d.name),
+          span("drive-opt-size", formatBytes(d.size_bytes)),
+          span("drive-opt-meta", d.device_path),
+        );
         li.addEventListener("click", () => selectDrive(d));
         driveOptionsEl.appendChild(li);
       });
@@ -321,16 +391,18 @@ function selectDrive(d: Drive | null) {
 
   if (d) {
     driveTriggerLabel.textContent = d.name;
-    driveTriggerMeta.textContent  = `${d.device_path} · ${formatBytes(d.size_bytes)}`;
+    driveTriggerMeta.textContent  = `${formatBytes(d.size_bytes)} · ${d.device_path}`;
     driveSelector.classList.add("drive-selector--selected");
 
     $("step-drive").classList.add("step--done");
     pingNum("step-drive");
 
-    driveCompactText.innerHTML =
-      `${d.name} <span class="compact-muted">· ${d.device_path} · ${formatBytes(d.size_bytes)}</span>`;
+    driveCompactText.replaceChildren(
+      span("", d.name),
+      span("compact-muted", ` · ${formatBytes(d.size_bytes)}`),
+      span("compact-faint", ` ${d.device_path}`),
+    );
 
-    $("step-image").classList.add("step--compact");
     $("step-drive").classList.add("step--compact");
     revealStep("step-flash", 180);
   } else {
@@ -338,9 +410,7 @@ function selectDrive(d: Drive | null) {
     driveTriggerMeta.textContent  = "";
     driveSelector.classList.remove("drive-selector--selected");
 
-    $("step-drive").classList.remove("step--done");
-    $("step-image").classList.remove("step--compact");
-    $("step-drive").classList.remove("step--compact");
+    $("step-drive").classList.remove("step--done", "step--compact");
     hideStep("step-flash");
   }
 
@@ -396,7 +466,9 @@ flashBtn.addEventListener("click", async () => {
   );
   if (!ok) return;
 
+  flashing = true;
   flashBtn.disabled   = true;
+  flashBtn.classList.add("hidden");
   driveSelector.classList.add("drive-selector--disabled");
   $<HTMLButtonElement>("change-image-compact").disabled  = true;
   $<HTMLButtonElement>("change-drive-compact").disabled  = true;
@@ -426,7 +498,9 @@ flashBtn.addEventListener("click", async () => {
       setStatus(`Flash failed: ${e}`, "error");
     }
   } finally {
+    flashing = false;
     flashBtn.disabled   = false;
+    flashBtn.classList.remove("hidden");
     driveSelector.classList.remove("drive-selector--disabled");
     $<HTMLButtonElement>("change-image-compact").disabled  = false;
     $<HTMLButtonElement>("change-drive-compact").disabled  = false;
