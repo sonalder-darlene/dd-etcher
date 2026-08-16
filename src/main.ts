@@ -372,8 +372,16 @@ refreshBtn.addEventListener("click", (e) => {
 });
 
 // ─── Cancel flash ─────────────────────────────────────────────────────────
+// Cancelling during the write corrupts the drive. Cancelling afterwards only
+// skips verification — the bytes are already there. Say which one it is.
+let currentPhase: FlashProgress["phase"] = "flashing";
+
 cancelFlashBtn.addEventListener("click", async () => {
-  const ok = confirm("Cancel the flash?\n\nThe drive will be left in a corrupted state and must be reflashed before use.");
+  const ok = confirm(
+    currentPhase === "flashing"
+      ? "Cancel the flash?\n\nThe drive will be left in a corrupted state and must be reflashed before use."
+      : "Skip verification?\n\nThe image is already written. Cancelling only skips the integrity check — the drive should still work, but it will not have been verified."
+  );
   if (ok) await invoke("cancel_flash");
 });
 listen("flash-stalled", () => {
@@ -392,6 +400,8 @@ flashBtn.addEventListener("click", async () => {
   driveSelector.classList.add("drive-selector--disabled");
   $<HTMLButtonElement>("change-image-compact").disabled  = true;
   $<HTMLButtonElement>("change-drive-compact").disabled  = true;
+  currentPhase = "flashing";
+  cancelFlashBtn.textContent = "CANCEL — DRIVE WILL BE CORRUPTED";
   cancelFlashBtn.classList.remove("hidden");
   progressEl.classList.remove("hidden");
   setStatus("requesting admin permission…");
@@ -403,6 +413,8 @@ flashBtn.addEventListener("click", async () => {
     const msg = String(e);
     if (msg === "cancelled") {
       setStatus("Flash cancelled — the drive is not usable. Flash again before use.", "error");
+    } else if (msg === "cancelled after write") {
+      setStatus("Verification skipped. The image was written but not checked.", "error");
     } else {
       setStatus(`Flash failed: ${e}`, "error");
     }
@@ -423,6 +435,10 @@ const phaseLabels: Record<string, string> = {
 
 listen<FlashProgress>("flash-progress", (event) => {
   const p = event.payload;
+  if (p.phase !== currentPhase) {
+    currentPhase = p.phase;
+    if (p.phase !== "flashing") cancelFlashBtn.textContent = "CANCEL — SKIP VERIFICATION";
+  }
   const ratio = p.total_bytes > 0 ? Math.min(1, p.bytes_written / p.total_bytes) : 0;
 
   let pct = 0;

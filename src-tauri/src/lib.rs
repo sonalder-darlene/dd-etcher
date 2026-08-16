@@ -83,7 +83,7 @@ fn is_safe_device(device: &str) -> bool {
     {
         device
             .strip_prefix("/dev/disk")
-            .map_or(false, |r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+            .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
     }
     #[cfg(target_os = "linux")]
     {

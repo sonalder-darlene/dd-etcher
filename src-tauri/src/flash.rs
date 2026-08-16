@@ -13,11 +13,19 @@ use tauri::{AppHandle, Emitter};
 
 pub struct FlashState {
     pub cancel: Arc<AtomicBool>,
+    /// Set while a flash is running. A plain flag rather than a Mutex: we only
+    /// need to reject a second caller, not queue it, and there is no guard
+    /// lifetime to thread through the async body. Release builds set
+    /// `panic = "abort"`, so a panic cannot leave this stuck true.
+    pub busy: AtomicBool,
 }
 
 impl Default for FlashState {
     fn default() -> Self {
-        Self { cancel: Arc::new(AtomicBool::new(false)) }
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            busy: AtomicBool::new(false),
+        }
     }
 }
 
@@ -41,10 +49,23 @@ pub async fn flash(
     drive_id: String,
     state: tauri::State<'_, FlashState>,
 ) -> Result<(), String> {
+    // Reject a second concurrent flash. The frontend disables the button, but
+    // any IPC caller can reach this command directly; two `dd` writes to one
+    // device produce garbage.
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("a flash is already in progress".into());
+    }
+
     let cancel = state.cancel.clone();
-    flash_inner(app, image_path, drive_id, cancel)
-        .await
-        .map_err(|e| format!("{e:#}"))
+    let result = flash_inner(app, image_path, drive_id, cancel).await;
+
+    // Drop the cached sudo credential rather than leaving it valid for the
+    // default five minutes after we are done with it.
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("/usr/bin/sudo").arg("-k").status();
+
+    state.busy.store(false, Ordering::SeqCst);
+    result.map_err(|e| format!("{e:#}"))
 }
 
 async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cancel: Arc<AtomicBool>) -> Result<()> {
@@ -87,7 +108,7 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
         let drive_id_c = drive_id.clone();
         let progress = progress.clone();
         let cancel = cancel.clone();
-        move || run_dd(&image_path, &device_path, &drive_id_c, total_bytes, progress, cancel)
+        move || run_dd(&image_path, &device_path, &drive_id_c, progress, cancel)
     })
     .await
     .context("flash task panicked")?;
@@ -111,7 +132,8 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
     let image_hash = tokio::task::spawn_blocking({
         let path = image_path.clone();
         let app2 = app.clone();
-        move || sha256_file(&path, total_bytes, app2)
+        let cancel = cancel.clone();
+        move || sha256_file(&path, total_bytes, app2, cancel)
     })
     .await??;
 
@@ -152,10 +174,35 @@ async fn flash_inner(app: AppHandle, image_path: String, drive_id: String, cance
     let mut line = String::new();
     let mut last_bytes = 0u64;
     let mut last_tick = std::time::Instant::now();
+    // Poll in one-second slices rather than blocking on read_line: a drive that
+    // dies after the write would otherwise hang here forever, and a cancel
+    // would go unnoticed. Matches the write phase's 120s stall budget.
+    let mut stalled = Duration::ZERO;
     loop {
         line.clear();
-        if lines.read_line(&mut line).await? == 0 {
-            break;
+        match tokio::time::timeout(Duration::from_secs(1), lines.read_line(&mut line)).await {
+            Err(_elapsed) => {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = child.kill().await;
+                    return Err(anyhow!("cancelled after write"));
+                }
+                stalled += Duration::from_secs(1);
+                if stalled >= Duration::from_secs(120) {
+                    let _ = child.kill().await;
+                    let _ = app.emit("flash-stalled", ());
+                    return Err(anyhow!(
+                        "the drive stopped responding during verification — the write itself completed"
+                    ));
+                }
+                continue;
+            }
+            Ok(Ok(0)) => break,
+            Ok(Ok(_)) => stalled = Duration::ZERO,
+            Ok(Err(e)) => return Err(e).context("reading verification progress"),
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill().await;
+            return Err(anyhow!("cancelled after write"));
         }
         if let Ok(bytes) = line.trim().parse::<u64>() {
             let now = std::time::Instant::now();
@@ -293,7 +340,13 @@ fn authenticate_sudo() -> Result<()> {
 /// Auth is separated from execution: we collect the password once via a
 /// native dialog, cache it with `sudo -v`, then use `sudo -n` for both
 /// the flash and verify steps (no repeated prompts).
-fn run_dd(image: &str, device: &str, drive_id: &str, _total: u64, progress: Arc<AtomicU64>, cancel: Arc<AtomicBool>) -> Result<()> {
+fn run_dd(
+    image: &str,
+    device: &str,
+    drive_id: &str,
+    progress: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     #[cfg(target_os = "macos")]
     authenticate_sudo()?;
 
@@ -420,7 +473,12 @@ fn spawn_progress_ticker(
     })
 }
 
-fn sha256_file(path: &str, total_bytes: u64, app: AppHandle) -> Result<[u8; 32]> {
+fn sha256_file(
+    path: &str,
+    total_bytes: u64,
+    app: AppHandle,
+    cancel: Arc<AtomicBool>,
+) -> Result<[u8; 32]> {
     let file = File::open(path).with_context(|| format!("opening {path}"))?;
     let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut hasher = Sha256::new();
@@ -429,6 +487,9 @@ fn sha256_file(path: &str, total_bytes: u64, app: AppHandle) -> Result<[u8; 32]>
     let mut last_tick = std::time::Instant::now();
     let mut last_bytes = 0u64;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("cancelled after write"));
+        }
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
