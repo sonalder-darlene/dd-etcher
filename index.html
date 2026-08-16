@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+
+    <!-- FDA onboarding -->
     <div id="fda-overlay" class="fda-overlay hidden">
       <div class="fda-card">
         <div class="fda-icon">⚠</div>
@@ -24,62 +26,145 @@
       </div>
     </div>
 
+    <!-- About modal -->
+    <div id="about-overlay" class="about-overlay hidden">
+      <div class="about-card">
+        <button id="about-close" class="about-close" title="Close">✕</button>
+        <div class="about-header">
+          <span class="about-mark">dd</span>
+          <div class="about-name-block">
+            <span class="about-name">-Etcher</span>
+            <span class="about-ver" id="about-version">—</span>
+          </div>
+        </div>
+        <dl class="about-dl">
+          <dt>Author</dt><dd>Darlene Sonalder &amp; Claude Code</dd>
+          <dt>License</dt><dd>GPL-3.0</dd>
+          <dt>Source</dt><dd><button class="link-btn" id="about-repo">github.com/sonalder-darlene/dd-Etcher</button></dd>
+        </dl>
+        <p class="about-acks-title">Built with</p>
+        <ul class="about-acks">
+          <li><strong>dd(1)</strong> — the Unix tool at the core</li>
+          <li><strong>Rust</strong> — systems language powering the backend</li>
+          <li><strong>Tauri</strong> — native app framework</li>
+          <li><strong>sha2</strong> — SHA-256 by RustCrypto</li>
+          <li><strong>Gulax</strong> — typeface by Morgan Gilbert &amp; Anton Moglia (SIL OFL 1.1)</li>
+        </ul>
+      </div>
+    </div>
+
     <main class="app">
-      <header>
-        <h1>dd-Etcher</h1>
-        <p class="tagline">Flash an image to a drive. Nothing else.</p>
-        <button id="about-btn" class="about-btn" title="About">?</button>
+
+      <header class="app-header">
+        <span class="logo-wordmark">dd-Etcher</span>
+        <div class="header-actions">
+          <button id="theme-toggle" class="icon-btn" title="Toggle theme">◐</button>
+          <button id="about-btn" class="icon-btn" title="About">?</button>
+        </div>
       </header>
 
-      <div id="about-overlay" class="about-overlay hidden">
-        <div class="about-card">
-          <button id="about-close" class="about-close" title="Close">✕</button>
-          <h2>dd-Etcher</h2>
-          <dl class="about-dl">
-            <dt>Version</dt><dd id="about-version">—</dd>
-            <dt>Author</dt><dd>Darlene Sonalder &amp; Claude Code (Anthropic)</dd>
-            <dt>License</dt><dd>GPL-3.0</dd>
-            <dt>Source</dt><dd><button class="link-btn" id="about-repo">github.com/sonalder-darlene/dd-Etcher</button></dd>
-          </dl>
-          <p class="about-acks-title">Acknowledgments</p>
-          <ul class="about-acks">
-            <li><strong>dd(1)</strong> — the Unix tool at the core</li>
-            <li><strong>Rust</strong> — systems language powering the backend</li>
-            <li><strong>Tauri</strong> — native app framework</li>
-            <li><strong>sha2</strong> — SHA-256 by RustCrypto</li>
-            <li><strong>Gulax</strong> — logo typeface by Morgan Gilbert &amp; Anton Moglia (SIL OFL 1.1)</li>
-          </ul>
-        </div>
+      <div class="pipeline">
+
+        <!-- ── 01 IMAGE ───────────────────────────────── -->
+        <section class="step" id="step-image">
+          <div class="step-aside">
+            <span class="step-num">01</span>
+          </div>
+          <div class="step-main">
+            <div class="step-label">IMAGE</div>
+
+            <!-- Idle: shown before any image is picked -->
+            <div id="image-idle">
+              <button id="pick-image" class="step-btn">Choose an image…</button>
+            </div>
+
+            <!-- Active: shown after image is picked -->
+            <div id="image-active" class="step-active hidden">
+
+              <!-- Expanded: full display with big size number -->
+              <div class="step-expanded">
+                <div class="image-ext-row">
+                  <span class="image-ext" id="image-ext"></span>
+                  <span class="image-ext-line" id="image-ext-line"></span>
+                </div>
+                <div class="image-basename" id="image-basename"></div>
+                <div class="size-row">
+                  <span class="size-num" id="size-num">0</span><span class="size-unit" id="size-unit">GB</span>
+                </div>
+                <button id="change-image" class="change-link">change</button>
+              </div>
+
+              <!-- Compact: one-liner summary when step 03 is revealed -->
+              <div class="step-compact-row">
+                <span class="compact-text" id="image-compact-text"></span>
+                <button id="change-image-compact" class="compact-change">change</button>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        <!-- ── 02 DRIVE ──────────────────────────────── -->
+        <section class="step step--hidden" id="step-drive">
+          <div class="step-aside">
+            <span class="step-num">02</span>
+          </div>
+          <div class="step-main">
+            <div class="step-label">DRIVE</div>
+
+            <div class="step-expanded">
+              <div class="drive-selector" id="drive-selector">
+                <div class="drive-trigger" id="drive-trigger" role="combobox" tabindex="0" aria-expanded="false" aria-haspopup="listbox">
+                  <span class="drive-caret" id="drive-caret">▸</span>
+                  <div class="drive-trigger-content">
+                    <span class="drive-trigger-label" id="drive-trigger-label">SELECT TARGET DRIVE</span>
+                    <span class="drive-trigger-meta" id="drive-trigger-meta"></span>
+                  </div>
+                  <button class="rescan-btn" id="refresh-drives">RESCAN <span class="rescan-icon">↺</span></button>
+                </div>
+                <ul class="drive-options" id="drive-options" role="listbox" aria-hidden="true"></ul>
+              </div>
+            </div>
+
+            <div class="step-compact-row">
+              <span class="compact-text" id="drive-compact-text"></span>
+              <button id="change-drive-compact" class="compact-change">change</button>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ── 03 FLASH ──────────────────────────────── -->
+        <section class="step step--hidden" id="step-flash">
+          <div class="step-aside">
+            <span class="step-num">03</span>
+          </div>
+          <div class="step-main">
+            <div class="step-label">FLASH</div>
+
+            <button id="flash" class="flash-btn" disabled>FLASH</button>
+            <button id="cancel-flash" class="cancel-btn hidden">CANCEL — DRIVE WILL BE CORRUPTED</button>
+
+            <div id="progress" class="progress hidden">
+              <div class="progress-phase-label" id="progress-phase">WRITING</div>
+              <div class="progress-track">
+                <div class="progress-fill" id="progress-fill"></div>
+                <div class="marker" style="left:40%"></div>
+                <div class="marker" style="left:70%"></div>
+              </div>
+              <div class="progress-stats">
+                <span class="progress-bytes" id="progress-bytes">—</span>
+                <span class="progress-speed" id="progress-speed"></span>
+              </div>
+            </div>
+
+            <div id="status" class="status"></div>
+          </div>
+        </section>
+
       </div>
-
-      <section class="step" data-step="1">
-        <div class="step-label">1. Image</div>
-        <button id="pick-image" class="pick">Choose an image…</button>
-        <div id="image-info" class="info hidden"></div>
-      </section>
-
-      <section class="step" data-step="2">
-        <div class="step-label">2. Drive</div>
-        <div class="drive-row">
-          <select id="drive-select">
-            <option value="">No drive selected</option>
-          </select>
-          <button id="refresh-drives" class="refresh" title="Refresh drives">↻</button>
-        </div>
-        <div id="drive-info" class="info hidden"></div>
-      </section>
-
-      <section class="step" data-step="3">
-        <div class="step-label">3. Flash</div>
-        <button id="flash" class="flash" disabled>Flash</button>
-        <button id="cancel-flash" class="cancel-flash hidden">Cancel — drive will be corrupted</button>
-        <div id="progress" class="progress hidden">
-          <div class="progress-bar"><div class="progress-fill"></div></div>
-          <div class="progress-text"></div>
-        </div>
-        <div id="status" class="status"></div>
-      </section>
     </main>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

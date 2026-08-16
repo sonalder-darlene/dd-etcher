@@ -10,5 +10,5 @@ export type FlashProgress = {
   bytes_written: number;
   total_bytes: number;
   bytes_per_second: number;
-  phase: "flashing" | "verifying" | "done";
+  phase: "flashing" | "hashing" | "verifying" | "done";
 };

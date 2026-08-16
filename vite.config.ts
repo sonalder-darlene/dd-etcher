@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  publicDir: "assets",
   clearScreen: false,
   server: {
     port: 1420,
