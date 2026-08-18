@@ -108,6 +108,22 @@ function setStatus(text: string, kind: "" | "ok" | "error" = "") {
   })();
 }
 
+// Collapse/expand a step at its real content height. The height is measured
+// immediately before the class flips, so the transition has a true target
+// rather than a guessed ceiling.
+function setStepCompact(stepId: string, compact: boolean) {
+  const step  = $(stepId);
+  const exp   = step.querySelector<HTMLElement>(".step-expanded");
+  const inner = step.querySelector<HTMLElement>(".step-expanded-inner");
+  // Only trust a measurement taken while the step is actually laid out — a
+  // hidden or already-clamped step measures 0, which would poison the value
+  // the expand direction reuses.
+  if (exp && inner && inner.scrollHeight > 0) {
+    exp.style.setProperty("--expanded-h", `${inner.scrollHeight}px`);
+  }
+  step.classList.toggle("step--compact", compact);
+}
+
 // Step reveal — spring entrance
 function revealStep(id: string, delay = 0) {
   const el = $(id);
@@ -191,9 +207,9 @@ function updateCompactImage() {
   const { val, unit } = getSizeProps(selectedImageSize);
   // e.g. "ubuntu-22.04  .ISO  · 6.8 GB"
   imageCompactText.replaceChildren(
-    span("", basename),
-    span("compact-accent", ext),
-    span("compact-muted", ` · ${formatSizeNum(val)} ${unit}`),
+    span("compact-chip", ext || "IMG"),
+    span("compact-name", basename),
+    span("compact-size", `${formatSizeNum(val)} ${unit}`),
   );
 }
 
@@ -296,9 +312,9 @@ async function applyImage(picked: string) {
     // into step 02 meant it never painted at all.
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => {
-      $("step-image").classList.add("step--compact");
-      revealStep("step-drive", 80);
-    }, 1000);
+      setStepCompact("step-image", true);
+      revealStep("step-drive", 260);
+    }, 2000);
   }
 
   updateFlashEnabled();
@@ -411,19 +427,20 @@ function selectDrive(d: Drive | null) {
     pingNum("step-drive");
 
     driveCompactText.replaceChildren(
-      span("", d.name),
-      span("compact-muted", ` · ${formatBytes(d.size_bytes)}`),
-      span("compact-faint", ` ${d.device_path}`),
+      span("compact-name", d.name),
+      span("compact-faint", d.device_path),
+      span("compact-size", formatBytes(d.size_bytes)),
     );
 
-    $("step-drive").classList.add("step--compact");
+    setStepCompact("step-drive", true);
     revealStep("step-flash", 180);
   } else {
     driveTriggerLabel.textContent = "SELECT TARGET DRIVE";
     driveTriggerMeta.textContent  = "";
     driveSelector.classList.remove("drive-selector--selected");
 
-    $("step-drive").classList.remove("step--done", "step--compact");
+    $("step-drive").classList.remove("step--done");
+    setStepCompact("step-drive", false);
     hideStep("step-flash");
   }
 
