@@ -263,6 +263,10 @@ async function applyImage(picked: string) {
   const filename = picked.split("/").pop() ?? picked;
   const isFirstPick = imageActive.classList.contains("hidden");
 
+  // Re-open the card so the choreography has somewhere to play. On a re-pick
+  // the step is sitting minimised.
+  if (!isFirstPick) setStepCompact("step-image", false);
+
   // Parse extension and base name
   const { basename, ext } = splitImageName(filename);
 
@@ -300,10 +304,10 @@ async function applyImage(picked: string) {
     void imageActive.offsetWidth;
     imageActive.classList.add("entering");
     $("step-image").classList.add("step--done");
-    pingNum("step-image");
     // Prefetch drives now so step 02 is populated the moment it appears.
     refreshDrives(true);
   }
+  pingNum("step-image");
 
   try {
     selectedImageSize = await invoke<number>("get_file_size", { path: picked });
@@ -318,16 +322,14 @@ async function applyImage(picked: string) {
     setStatus(`Could not read that image: ${e}`, "error");
   }
 
-  if (isFirstPick) {
-    // Hold the expanded card long enough for the count-up to land. The
-    // magnitude-scaled size is the point of this moment; collapsing straight
-    // into step 02 meant it never painted at all.
-    if (settleTimer) clearTimeout(settleTimer);
-    settleTimer = setTimeout(() => {
-      setStepCompact("step-image", true);
-      revealStep("step-drive", 260);
-    }, 2000);
-  }
+  // Hold the expanded card long enough for the count-up to land. The
+  // magnitude-scaled size is the point of this moment; collapsing straight into
+  // step 02 meant it never painted at all.
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    setStepCompact("step-image", true);
+    if (isFirstPick) revealStep("step-drive", 260);
+  }, 2000);
 
   updateFlashEnabled();
 }
