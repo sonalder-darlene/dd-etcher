@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -79,7 +78,8 @@ async fn flash_inner(
     if !image.is_file() {
         return Err(anyhow!("image not found: {image_path}"));
     }
-    let total_bytes = std::fs::metadata(image)?.len();
+    // The bytes that will land on the device — decompressed, for a .xz.
+    let total_bytes = crate::image::image_size(&image_path)?;
 
     // Re-query drive size from the OS — do not trust the frontend-supplied value.
     let drive_size_bytes =
@@ -446,7 +446,7 @@ fn run_dd(
 
     let pipe_result: Result<()> = {
         let mut stdin = child.stdin.take().unwrap();
-        let mut src = File::open(image).context("opening image")?;
+        let mut src = crate::image::open_image(image)?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -601,8 +601,8 @@ fn sha256_file(
     app: AppHandle,
     cancel: Arc<AtomicBool>,
 ) -> Result<[u8; 32]> {
-    let file = File::open(path).with_context(|| format!("opening {path}"))?;
-    let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
+    // Hash the decompressed stream — those are the bytes on the device.
+    let mut reader = crate::image::open_image(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 4 * 1024 * 1024];
     let mut bytes_read = 0u64;

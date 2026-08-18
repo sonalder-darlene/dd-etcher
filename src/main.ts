@@ -201,9 +201,7 @@ function animateSize(bytes: number) {
 function updateCompactImage() {
   if (!selectedImage || selectedImageSize === null) return;
   const filename = selectedImage.split("/").pop() ?? selectedImage;
-  const dotIdx   = filename.lastIndexOf(".");
-  const ext      = dotIdx !== -1 ? filename.slice(dotIdx).toUpperCase() : "";
-  const basename = dotIdx !== -1 ? filename.slice(0, dotIdx) : filename;
+  const { basename, ext } = splitImageName(filename);
   const { val, unit } = getSizeProps(selectedImageSize);
   // e.g. "ubuntu-22.04  .ISO  · 6.8 GB"
   imageCompactText.replaceChildren(
@@ -225,11 +223,25 @@ function updateFlashEnabled() {
 }
 
 // ─── Image picker ─────────────────────────────────────────────────────────
-const IMAGE_EXTS = ["img", "iso", "dmg", "bin", "raw"];
+const IMAGE_EXTS = ["img", "iso", "dmg", "bin", "raw", "xz"];
 
 function isImagePath(path: string): boolean {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return IMAGE_EXTS.includes(ext);
+}
+
+// Split a filename into base and extension, keeping compound extensions whole.
+// Raspberry Pi OS ships "...-lite.img.xz"; splitting on the last dot alone
+// would label it ".XZ" and leave "...-lite.img" as the name.
+function splitImageName(filename: string): { basename: string; ext: string } {
+  const compound = /\.(img|iso|dmg|bin|raw)\.xz$/i.exec(filename);
+  if (compound) {
+    return { basename: filename.slice(0, compound.index), ext: compound[0].toUpperCase() };
+  }
+  const dot = filename.lastIndexOf(".");
+  return dot === -1
+    ? { basename: filename, ext: "" }
+    : { basename: filename.slice(0, dot), ext: filename.slice(dot).toUpperCase() };
 }
 
 async function openImagePicker() {
@@ -237,7 +249,7 @@ async function openImagePicker() {
     multiple: false,
     directory: false,
     filters: [
-      { name: "Disk images", extensions: IMAGE_EXTS },
+      { name: "Disk images", extensions: ["img", "iso", "dmg", "bin", "raw", "img.xz", "iso.xz", "xz"] },
       { name: "All files", extensions: ["*"] },
     ],
   });
@@ -252,9 +264,7 @@ async function applyImage(picked: string) {
   const isFirstPick = imageActive.classList.contains("hidden");
 
   // Parse extension and base name
-  const dotIdx  = filename.lastIndexOf(".");
-  const ext     = dotIdx !== -1 ? filename.slice(dotIdx).toUpperCase() : "";
-  const basename = dotIdx !== -1 ? filename.slice(0, dotIdx) : filename;
+  const { basename, ext } = splitImageName(filename);
 
   // Act 1: extension punches up from below
   imageExtEl.textContent = ext || filename.toUpperCase();
@@ -304,7 +314,9 @@ async function applyImage(picked: string) {
     if (!$("step-flash").classList.contains("step--hidden")) {
       updateFlashEnabled();
     }
-  } catch (_) {}
+  } catch (e) {
+    setStatus(`Could not read that image: ${e}`, "error");
+  }
 
   if (isFirstPick) {
     // Hold the expanded card long enough for the count-up to land. The
@@ -347,7 +359,7 @@ function showDrop(paths: string[]) {
     dropSub.textContent   = `${paths.length} files`;
   } else {
     dropTitle.textContent = "NOT A DISK IMAGE";
-    dropSub.textContent   = IMAGE_EXTS.map((e) => `.${e}`).join("  ");
+    dropSub.textContent   = ".img  .iso  .dmg  .bin  .raw  .img.xz";
   }
   dropOverlay.classList.remove("hidden");
 }
@@ -369,7 +381,7 @@ getCurrentWebview().onDragDropEvent(async ({ payload }) => {
     if (payload.paths.length === 1 && path !== undefined && isImagePath(path)) {
       await applyImage(path);
     } else {
-      setStatus("That is not a disk image — expected .img, .iso, .dmg, .bin or .raw.", "error");
+      setStatus("That is not a disk image — expected .img, .iso, .dmg, .bin, .raw or .img.xz.", "error");
     }
   }
 });

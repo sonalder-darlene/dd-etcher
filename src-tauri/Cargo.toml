@@ -27,6 +27,8 @@ anyhow = "1"
 thiserror = "2"
 libc = "0.2"
 zeroize = "1"
+# Vendored liblzma (0BSD). Raspberry Pi OS and friends ship .img.xz.
+xz2 = { version = "0.1", features = ["static"] }
 
 [features]
 default = ["custom-protocol"]

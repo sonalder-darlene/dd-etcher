@@ -1,5 +1,6 @@
 mod drives;
 mod flash;
+mod image;
 
 /// Privileged helper: hash the first `limit` bytes of a device, print hex SHA-256 to stdout.
 /// Called via `sudo -n` after flashing — reuses the cached sudo credential.
@@ -214,11 +215,11 @@ fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The number of bytes this image will occupy once written — for a `.xz` that
+/// is the uncompressed size, not the file size.
 #[tauri::command]
 fn get_file_size(path: String) -> Result<u64, String> {
-    std::fs::metadata(&path)
-        .map(|m| m.len())
-        .map_err(|e| e.to_string())
+    image::image_size(&path).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

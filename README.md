@@ -16,7 +16,8 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 
 ## Features
 
-- Select an image (`.img`, `.iso`, `.dmg`, `.bin`, `.raw`)
+- Select an image (`.img`, `.iso`, `.dmg`, `.bin`, `.raw`) or an xz-compressed one (`.img.xz`) — the format Raspberry Pi OS ships in
+- Drag and drop an image onto the window
 - Select an external drive (internal drives should be hidden automatically to avoid mistakes)
 - Flash via `dd` (It will ask for your admin password to do so)
 - Verify flash integrity via SHA-256 checksum with live progress
@@ -105,7 +106,7 @@ The Rust core has platform-specific branches for drive enumeration (`lsblk` inst
 - [ ] Friendlier error messages when `dd` fails mid-write (capture and surface `dd` stderr)
 - [x] Progress tracking during the verify phase
 - [ ] TUI frontend sharing the same Rust core (`ratatui`)
-- [ ] Compressed image support (`.img.xz`, `.img.gz`)
+- [x] Compressed image support (`.img.xz`); `.gz` still to do
 - [ ] CI: build + notarize macOS, Flatpak on Linux
 
 ## Logo icon
