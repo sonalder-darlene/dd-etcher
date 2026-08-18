@@ -157,6 +157,9 @@ function formatSizeNum(val: number): string {
   return val < 10 ? val.toFixed(1) : Math.round(val).toString();
 }
 
+// Delay between the expanded image card and handing the window to step 02.
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
 // Count up from 0 to target value using rAF — gives the satisfying "loading in" feel
 let countRaf: number | null = null;
 function animateSize(bytes: number) {
@@ -270,10 +273,9 @@ async function applyImage(picked: string) {
     imageActive.classList.remove("hidden", "entering");
     void imageActive.offsetWidth;
     imageActive.classList.add("entering");
-    $("step-image").classList.add("step--done", "step--compact");
+    $("step-image").classList.add("step--done");
     pingNum("step-image");
-    revealStep("step-drive", 100);
-    // Refresh drives when step 02 first appears
+    // Prefetch drives now so step 02 is populated the moment it appears.
     refreshDrives(true);
   }
 
@@ -287,6 +289,17 @@ async function applyImage(picked: string) {
       updateFlashEnabled();
     }
   } catch (_) {}
+
+  if (isFirstPick) {
+    // Hold the expanded card long enough for the count-up to land. The
+    // magnitude-scaled size is the point of this moment; collapsing straight
+    // into step 02 meant it never painted at all.
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      $("step-image").classList.add("step--compact");
+      revealStep("step-drive", 80);
+    }, 1000);
+  }
 
   updateFlashEnabled();
 }
