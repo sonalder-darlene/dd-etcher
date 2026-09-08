@@ -31,6 +31,11 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app"],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../src/fonts/LICENSE.txt": "fonts/Gulax-LICENSE.txt",
+      "../src/fonts/COPYRIGHT.md": "fonts/Gulax-COPYRIGHT.md"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
