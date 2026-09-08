@@ -231,8 +231,6 @@ fn open_repo() {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-use tauri::Manager as _;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -248,10 +246,13 @@ pub fn run() {
             open_repo,
             get_file_size,
         ])
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(debug_assertions)]
-            if let Some(w) = app.get_webview_window("main") {
-                w.open_devtools();
+            {
+                use tauri::Manager as _;
+                if let Some(w) = _app.get_webview_window("main") {
+                    w.open_devtools();
+                }
             }
             Ok(())
         })
