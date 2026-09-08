@@ -94,6 +94,16 @@ mod macos {
         Ok(info(id)?.size_bytes)
     }
 
+    /// A mounted `.dmg` is external, ejectable, and `RemovableMedia: true` by
+    /// diskutil's reckoning, so it reaches this point alongside USB sticks.
+    /// `VirtualOrPhysical` is what separates them. Absent key means physical —
+    /// hiding a real drive is worse than listing a disk image.
+    pub(super) fn is_virtual(dict: &plist::Dictionary) -> bool {
+        dict.get("VirtualOrPhysical")
+            .and_then(|v| v.as_string())
+            .is_some_and(|s| s.eq_ignore_ascii_case("virtual"))
+    }
+
     fn info(id: &str) -> Result<Drive> {
         let output = Command::new("diskutil")
             .args(["info", "-plist", id])
@@ -111,6 +121,10 @@ mod macos {
         let dict = plist
             .as_dictionary()
             .ok_or_else(|| anyhow!("diskutil info: not a dict"))?;
+
+        if is_virtual(dict) {
+            return Err(anyhow!("{id} is a disk image, not physical media"));
+        }
 
         let size_bytes = dict
             .get("TotalSize")
@@ -139,6 +153,34 @@ mod macos {
             removable,
             device_path,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::macos::is_virtual;
+    use plist::{Dictionary, Value};
+
+    fn dict(entries: &[(&str, &str)]) -> Dictionary {
+        let mut d = Dictionary::new();
+        for (k, v) in entries {
+            d.insert(k.to_string(), Value::String(v.to_string()));
+        }
+        d
+    }
+
+    #[test]
+    fn disk_images_are_virtual() {
+        assert!(is_virtual(&dict(&[("VirtualOrPhysical", "Virtual")])));
+        assert!(is_virtual(&dict(&[("VirtualOrPhysical", "virtual")])));
+    }
+
+    #[test]
+    fn real_media_is_not() {
+        assert!(!is_virtual(&dict(&[("VirtualOrPhysical", "Physical")])));
+        // Absent key: show the drive rather than hide it.
+        assert!(!is_virtual(&dict(&[("RemovableMedia", "true")])));
+        assert!(!is_virtual(&Dictionary::new()));
     }
 }
 
