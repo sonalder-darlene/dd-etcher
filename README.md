@@ -4,6 +4,18 @@ A minimal image flasher for macOS (and soon Linux). Think Balena Etcher, but wit
 
 > **Disclaimer:** dd-Etcher is in early development. Please use with caution and report bugs.
 
+## Install
+
+1. Download the `.dmg` from [Releases](https://github.com/sonalder-darlene/dd-etcher/releases). One build runs on both Apple Silicon and Intel Macs.
+2. Drag **dd-Etcher** into `/Applications`. Install it there, not in `~/Applications`: the app runs itself as root to write the drive, which is only safe from a folder you cannot write to without a password.
+3. dd-Etcher is not notarized by Apple, so on first launch macOS will claim the app "is damaged and can't be opened". It isn't — macOS says this about every download that is not notarized. Clear the download flag once in Terminal:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/dd-Etcher.app
+   ```
+
+4. Launch it. It will ask for **Full Disk Access** and walk you through granting it ([why](#requirements)).
+
 ## Why
 
 Balena Etcher is the de-facto GUI image flasher on macOS but ships with aggressive telemetry and a heavy Electron bundle. For many users, the terminal is intimidating and `dd` has a reputation for being "Disk Destroyer". That's why I created a BS-free `dd` GUI with the help of Claude Code. dd-Etcher does the same four things as Balena Etcher:
@@ -93,7 +105,16 @@ Grant Full Disk Access to the debug binary the first time:
 pnpm tauri build
 ```
 
-Produces a `.app` and `.dmg` in `src-tauri/target/release/bundle/`. Code signing and notarization require an Apple Developer certificate.
+Produces a `.app` and `.dmg` for your own Mac's architecture in `src-tauri/target/release/bundle/`. Code signing and notarization require an Apple Developer certificate.
+
+Releases are universal (Apple Silicon and Intel in one binary):
+
+```sh
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+pnpm tauri build --target universal-apple-darwin
+```
+
+Output lands in `src-tauri/target/universal-apple-darwin/release/bundle/`.
 
 
 ## Porting to Linux
