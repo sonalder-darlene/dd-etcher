@@ -240,6 +240,7 @@ pub fn run() {
             drives::list_drives,
             flash::flash,
             flash::cancel_flash,
+            flash::eject_drive,
             check_fda,
             open_fda_settings,
             app_version,

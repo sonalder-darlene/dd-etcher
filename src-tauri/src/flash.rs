@@ -56,7 +56,9 @@ pub async fn flash(
     }
 
     let cancel = state.cancel.clone();
-    let result = flash_inner(app, image_path, drive_id, cancel).await;
+    let result = flash_inner(app, image_path, drive_id, cancel.clone()).await;
+    // Stop the background source hash if the run ended before it was needed.
+    cancel.store(true, Ordering::Relaxed);
 
     // Drop the cached sudo credential rather than leaving it valid for the
     // default five minutes after we are done with it.
@@ -94,6 +96,16 @@ async fn flash_inner(
     // build the path ourselves rather than trusting the frontend, so the
     // privileged dd invocation can only target an enumerated drive.
     let device_path = resolve_device_path(&drive_id)?;
+
+    // Hash the source alongside the write rather than after it: it reads from
+    // the local disk and is normally done long before the USB write is.
+    let hashed = Arc::new(AtomicU64::new(0));
+    let hash_task = tokio::task::spawn_blocking({
+        let path = image_path.clone();
+        let hashed = hashed.clone();
+        let cancel = cancel.clone();
+        move || sha256_file(&path, hashed, cancel)
+    });
 
     // --- phase: flashing ---
     let progress = Arc::new(AtomicU64::new(0));
@@ -161,24 +173,29 @@ async fn flash_inner(
     }
     flash_result?;
 
-    // --- phase: verifying ---
-    // Hash the source image with live progress events.
-    let _ = app.emit(
-        "flash-progress",
-        FlashProgress {
-            bytes_written: 0,
+    // --- phase: hashing ---
+    // Only shown if the source hash is still running — a big .xz on a fast
+    // stick, say. The ticker's first event comes after 500 ms, so a hash that
+    // is nearly done never flashes the phase on screen.
+    let hash_stop = Arc::new(AtomicBool::new(false));
+    let hash_ticker = (!hash_task.is_finished()).then(|| {
+        spawn_progress_ticker(
+            app.clone(),
+            hashed.clone(),
+            hash_stop.clone(),
+            cancel.clone(),
             total_bytes,
-            bytes_per_second: 0,
-            phase: "hashing",
-        },
-    );
-    let image_hash = tokio::task::spawn_blocking({
-        let path = image_path.clone();
-        let app2 = app.clone();
-        let cancel = cancel.clone();
-        move || sha256_file(&path, total_bytes, app2, cancel)
-    })
-    .await??;
+            "hashing",
+        )
+    });
+    let image_hash = hash_task.await.context("hash task panicked");
+    hash_stop.store(true, Ordering::Relaxed);
+    if let Some(t) = hash_ticker {
+        let _ = t.await;
+    }
+    let image_hash = image_hash??;
+
+    // --- phase: verifying ---
 
     // Re-unmount: macOS auto-mounts filesystems it recognises after a write.
     // Without this, reads from the block device stall while the OS accesses it.
@@ -320,6 +337,28 @@ fn notify_complete() {
         .spawn();
 }
 
+/// Eject a drive that now holds a finished image. Without this macOS mounts
+/// the new partitions and then warns "Disk Not Ejected Properly" when the
+/// stick is pulled.
+#[tauri::command]
+pub async fn eject_drive(drive_id: String) -> Result<(), String> {
+    let device = resolve_device_path(&drive_id).map_err(|e| format!("{e:#}"))?;
+    if !crate::is_safe_device(&device) {
+        return Err(format!("refusing to eject {device}"));
+    }
+    #[cfg(target_os = "macos")]
+    let status = Command::new("diskutil").args(["eject", &device]).status();
+    #[cfg(target_os = "linux")]
+    let status = Command::new("udisksctl")
+        .args(["power-off", "-b", &device])
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("eject exited with {s}")),
+        Err(e) => Err(format!("could not run eject: {e}")),
+    }
+}
+
 fn resolve_device_path(drive_id: &str) -> Result<String> {
     // Reject anything that isn't plain alphanumerics so we can't be tricked
     // into targeting arbitrary paths through the admin prompt.
@@ -356,7 +395,10 @@ fn authenticate_sudo() -> Result<()> {
         .args([
             "-e",
             "set r to display dialog \
-             \"dd-Etcher needs administrator access to flash the drive.\" \
+             \"Enter your password to let dd-Etcher write to the drive.\" \
+             & return & return & \
+             \"macOS only lets an administrator write to a whole disk. \
+             The password is used for this flash and its check, then forgotten.\" \
              with hidden answer default answer \"\" \
              with title \"dd-Etcher\" \
              buttons {\"Cancel\", \"OK\"} default button \"OK\"",
@@ -595,19 +637,11 @@ fn spawn_progress_ticker(
     })
 }
 
-fn sha256_file(
-    path: &str,
-    total_bytes: u64,
-    app: AppHandle,
-    cancel: Arc<AtomicBool>,
-) -> Result<[u8; 32]> {
+fn sha256_file(path: &str, hashed: Arc<AtomicU64>, cancel: Arc<AtomicBool>) -> Result<[u8; 32]> {
     // Hash the decompressed stream — those are the bytes on the device.
     let mut reader = crate::image::open_image(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 4 * 1024 * 1024];
-    let mut bytes_read = 0u64;
-    let mut last_tick = std::time::Instant::now();
-    let mut last_bytes = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled after write"));
@@ -617,23 +651,7 @@ fn sha256_file(
             break;
         }
         hasher.update(&buf[..n]);
-        bytes_read += n as u64;
-        let now = std::time::Instant::now();
-        if now.duration_since(last_tick).as_millis() >= 200 {
-            let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
-            let rate = ((bytes_read - last_bytes) as f64 / dt) as u64;
-            last_bytes = bytes_read;
-            last_tick = now;
-            let _ = app.emit(
-                "flash-progress",
-                FlashProgress {
-                    bytes_written: bytes_read,
-                    total_bytes,
-                    bytes_per_second: rate,
-                    phase: "hashing",
-                },
-            );
-        }
+        hashed.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(hasher.finalize().into())
 }
