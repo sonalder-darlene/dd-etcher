@@ -69,6 +69,7 @@ const driveCompactText  = $<HTMLSpanElement>("drive-compact-text");
 
 const flashBtn          = $<HTMLButtonElement>("flash");
 const cancelFlashBtn    = $<HTMLButtonElement>("cancel-flash");
+const flashAgainBtn     = $<HTMLButtonElement>("flash-again");
 const progressEl        = $<HTMLDivElement>("progress");
 const progressFill      = $<HTMLDivElement>("progress-fill");
 const progressPhaseEl   = $<HTMLDivElement>("progress-phase");
@@ -92,21 +93,54 @@ function formatBytes(n: number): string {
   return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
 }
 
-// Typewriter for status messages
-let typewriterTimer: ReturnType<typeof setTimeout> | null = null;
-function setStatus(text: string, kind: "" | "ok" | "error" = "") {
-  if (typewriterTimer) clearTimeout(typewriterTimer);
-  statusEl.className = `status ${kind}`;
-  if (kind === "ok") { statusEl.textContent = text; return; }
-  statusEl.textContent = "";
-  let i = 0;
-  (function type() {
-    if (i < text.length) {
-      statusEl.textContent = text.slice(0, ++i);
-      typewriterTimer = setTimeout(type, 14);
-    }
-  })();
+// Restart a one-shot CSS animation on an element.
+function replay(el: HTMLElement, cls: string) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
 }
+
+// Status line. Progress events arrive several times a second, so the text only
+// animates when it actually changes — re-running an entrance on every event is
+// what made it flicker. `busy` adds three dots that pulse on their own.
+function setStatus(text: string, kind: "" | "ok" | "error" = "", busy = false) {
+  const key = `${kind}|${busy}|${text}`;
+  if (statusEl.dataset.key === key) return;
+  statusEl.dataset.key = key;
+  statusEl.className = `status ${kind}`;
+  statusEl.replaceChildren(text);
+  if (busy) {
+    const dots = span("dots", "");
+    dots.setAttribute("aria-hidden", "true");
+    dots.append(span("", "."), span("", "."), span("", "."));
+    statusEl.append(dots);
+  }
+  if (text) replay(statusEl, "text-enter");
+}
+
+// ─── Confirm dialog ──────────────────────────────────────────────────────
+const askOverlay = $<HTMLDivElement>("ask-overlay");
+const askYes     = $<HTMLButtonElement>("ask-yes");
+const askNo      = $<HTMLButtonElement>("ask-no");
+let askDone: ((ok: boolean) => void) | null = null;
+
+function ask(title: string, body: string, yes: string, no: string, danger = false): Promise<boolean> {
+  askDone?.(false);
+  $("ask-title").textContent = title;
+  $("ask-body").textContent  = body;
+  askYes.textContent = yes;
+  askNo.textContent  = no;
+  askYes.classList.toggle("danger", danger);
+  askOverlay.classList.remove("hidden");
+  askNo.focus();   // the safe answer is the one Enter picks
+  return new Promise((resolve) => {
+    askDone = (ok) => { askDone = null; askOverlay.classList.add("hidden"); resolve(ok); };
+  });
+}
+askYes.addEventListener("click", () => askDone?.(true));
+askNo.addEventListener("click",  () => askDone?.(false));
+askOverlay.addEventListener("click", (e) => { if (e.target === askOverlay) askDone?.(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") askDone?.(false); });
 
 // Collapse/expand a step at its real content height. The height is measured
 // immediately before the class flips, so the transition has a true target
@@ -430,6 +464,7 @@ async function refreshDrives(silent = false) {
 
 function selectDrive(d: Drive | null) {
   selectedDrive = d;
+  resetFlashStep();
   driveSelector.classList.remove("drive-selector--open");
 
   if (d) {
@@ -491,40 +526,84 @@ refreshBtn.addEventListener("click", (e) => {
 let currentPhase: FlashProgress["phase"] = "flashing";
 
 cancelFlashBtn.addEventListener("click", async () => {
-  const ok = confirm(
-    currentPhase === "flashing"
-      ? "Stop flashing?\n\nThe drive will be erased so a half-written image can't be mistaken for a working one. You can flash it again whenever you like."
-      : "Skip the check?\n\nThe image is already written and the drive will work. This only skips confirming it was written correctly."
+  const writing = currentPhase === "flashing";
+  const ok = await ask(
+    writing ? "Stop flashing?" : "Skip the check?",
+    writing
+      ? "The drive will be erased so a half-written image can't be mistaken for a working one. You can flash it again whenever you like."
+      : "The image is already written and the drive will work. This only skips confirming it was written correctly.",
+    writing ? "STOP" : "SKIP CHECK",
+    writing ? "KEEP GOING" : "KEEP CHECKING",
+    writing,
   );
-  if (ok) await invoke("cancel_flash");
+  if (ok && flashing) await invoke("cancel_flash");
 });
 listen("flash-stalled", () => {
   setStatus("Drive stalled for 2 minutes — flash cancelled. Check the drive and try again.", "error");
 });
 
 // ─── Flash ────────────────────────────────────────────────────────────────
+function resetFlashStep() {
+  flashAgainBtn.classList.add("hidden");
+  flashBtn.classList.remove("hidden");
+  progressEl.classList.add("hidden");
+  setStatus("");
+}
+
+// A finished drive is ejected, so macOS does not remount it and then warn when
+// it is pulled. It then leaves the drive list, so the way on is choosing a
+// drive again — never re-flashing the one that just left.
+async function finishDrive(done: string, driveId: string) {
+  try {
+    await invoke("eject_drive", { driveId });
+    setStatus(`${done}\nYou can remove the drive.`, "ok");
+  } catch {
+    setStatus(`${done}\nEject the drive before removing it.`, "ok");
+  }
+}
+
+flashAgainBtn.addEventListener("click", () => {
+  selectDrive(null);
+  refreshDrives(true);
+});
+
 flashBtn.addEventListener("click", async () => {
   if (!selectedImage || !selectedDrive) return;
-  const ok = confirm(
-    `This will ERASE all data on "${selectedDrive.name}" (${selectedDrive.device_path}).\n\nContinue?`
+  const drive = selectedDrive;
+  const ok = await ask(
+    "Erase this drive?",
+    `Everything on ${drive.name} (${drive.device_path}, ${formatBytes(drive.size_bytes)}) will be replaced by ${selectedImage.split("/").pop()}.`,
+    "ERASE & FLASH",
+    "CANCEL",
+    true,
   );
   if (!ok) return;
 
   flashing = true;
+  let finished = false;
   flashBtn.disabled   = true;
   flashBtn.classList.add("hidden");
   driveSelector.classList.add("drive-selector--disabled");
   $<HTMLButtonElement>("change-image-compact").disabled  = true;
   $<HTMLButtonElement>("change-drive-compact").disabled  = true;
   currentPhase = "flashing";
+  resetRate();
   cancelFlashBtn.textContent = "CANCEL";
   cancelFlashBtn.classList.remove("hidden");
+  // A previous run leaves the bar full and the label on DONE.
+  progressFill.classList.remove("phase-done");
+  progressFill.style.width = "0%";
+  progressPhaseEl.className   = "progress-phase-label";
+  progressPhaseEl.textContent = phaseLabels.flashing;
+  progressBytesEl.textContent = "—";
+  progressSpeedEl.textContent = "";
   progressEl.classList.remove("hidden");
-  setStatus("requesting admin permission…");
+  setStatus("Waiting for your password", "", true);
 
   try {
-    await invoke("flash", { imagePath: selectedImage, driveId: selectedDrive.id });
-    setStatus("Flash complete and verified ✓", "ok");
+    await invoke("flash", { imagePath: selectedImage, driveId: drive.id });
+    await finishDrive("Flash complete and verified ✓", drive.id);
+    finished = true;
   } catch (e) {
     const msg = String(e);
     if (msg === "cancelled") {
@@ -532,24 +611,33 @@ flashBtn.addEventListener("click", async () => {
       // outcome, not a warning the user has to act on.
       setStatus("Cancelled. The drive was erased and is ready to use again.", "ok");
     } else if (msg === "cancelled after write") {
-      setStatus("Check skipped — the image is written and the drive is ready.", "ok");
+      await finishDrive("Check skipped — the image is written.", drive.id);
+      finished = true;
     } else if (msg.startsWith("wipe failed")) {
       setStatus(
         "Stopped, but the drive could not be erased. It holds a partial image — erase it in Disk Utility before using it.",
         "error"
       );
+    } else if (msg === "Authentication cancelled.") {
+      progressEl.classList.add("hidden");
+      setStatus("");
     } else {
       setStatus(`Flash failed: ${e}`, "error");
     }
   } finally {
     flashing = false;
+    askDone?.(false);
     flashBtn.disabled   = false;
-    flashBtn.classList.remove("hidden");
     driveSelector.classList.remove("drive-selector--disabled");
     $<HTMLButtonElement>("change-image-compact").disabled  = false;
     $<HTMLButtonElement>("change-drive-compact").disabled  = false;
     cancelFlashBtn.classList.add("hidden");
-    updateFlashEnabled();
+    if (finished) {
+      flashAgainBtn.classList.remove("hidden");
+    } else {
+      flashBtn.classList.remove("hidden");
+      updateFlashEnabled();
+    }
   }
 });
 
@@ -557,11 +645,38 @@ flashBtn.addEventListener("click", async () => {
 const phaseLabels: Record<string, string> = {
   flashing: "WRITING", wiping: "ERASING", hashing: "CHECKING", verifying: "VERIFYING", done: "DONE",
 };
+const phaseStatus: Record<string, string> = {
+  flashing:  "Writing the image to the drive",
+  wiping:    "Erasing the drive so it is safe to reuse",
+  hashing:   "Finishing the image checksum",
+  verifying: "Reading the drive back to check every byte",
+};
+
+// Share of the bar given to the write. It dominates the wall-clock time:
+// reading back is usually 2–3× faster than writing to a USB stick, and the
+// source hash runs alongside the write. The ETA uses the same assumption.
+const WRITE_SHARE = 70;
+
+// The raw rate is measured over half a second and jumps around; smooth it so
+// neither the speed nor the ETA twitches.
+let smoothedRate = 0;
+let rateSamples  = 0;
+function resetRate() { smoothedRate = 0; rateSamples = 0; }
+
+function etaText(p: FlashProgress): string {
+  // The first seconds of a write fill the OS cache and read far too fast.
+  if (rateSamples < 6 || smoothedRate <= 0) return "";
+  let secs = (p.total_bytes - p.bytes_written) / smoothedRate;
+  if (p.phase === "flashing") secs += (p.total_bytes / smoothedRate) * (100 - WRITE_SHARE) / WRITE_SHARE;
+  return secs < 60 ? "less than a minute left" : `about ${Math.round(secs / 60)} min left`;
+}
 
 listen<FlashProgress>("flash-progress", (event) => {
   const p = event.payload;
   if (p.phase !== currentPhase) {
     currentPhase = p.phase;
+    resetRate();
+    askDone?.(false);   // a question about the previous phase no longer applies
     if (p.phase === "wiping") cancelFlashBtn.classList.add("hidden");
     else if (p.phase !== "flashing") cancelFlashBtn.textContent = "SKIP CHECK";
   }
@@ -569,9 +684,9 @@ listen<FlashProgress>("flash-progress", (event) => {
 
   let pct = 0;
   if      (p.phase === "wiping")     pct = 100;   // indeterminate; keep the bar full rather than rewinding
-  else if (p.phase === "flashing")   pct = ratio * 40;
-  else if (p.phase === "hashing")    pct = 40 + ratio * 30;
-  else if (p.phase === "verifying")  pct = 70 + ratio * 30;
+  else if (p.phase === "flashing")   pct = ratio * WRITE_SHARE;
+  else if (p.phase === "hashing")    pct = WRITE_SHARE;   // brief, and the label says what is happening
+  else if (p.phase === "verifying")  pct = WRITE_SHARE + ratio * (100 - WRITE_SHARE);
   else if (p.phase === "done")       pct = 100;
 
   progressFill.style.width = `${pct}%`;
@@ -579,17 +694,23 @@ listen<FlashProgress>("flash-progress", (event) => {
   const label = phaseLabels[p.phase] ?? p.phase.toUpperCase();
   if (progressPhaseEl.textContent !== label) {
     progressPhaseEl.textContent = label;
-    progressPhaseEl.className = `progress-phase-label${p.phase === "done" ? " phase-done" : ""}`;
+    progressPhaseEl.className = "progress-phase-label";
+    replay(progressPhaseEl, p.phase === "done" ? "phase-done" : "text-enter");
   }
   if (p.phase === "done") progressFill.classList.add("phase-done");
 
+  if (p.bytes_per_second > 0) {
+    smoothedRate = smoothedRate ? smoothedRate * 0.8 + p.bytes_per_second * 0.2 : p.bytes_per_second;
+    rateSamples++;
+  }
   progressBytesEl.textContent = `${formatBytes(p.bytes_written)} / ${formatBytes(p.total_bytes)}`;
-  progressSpeedEl.textContent = p.bytes_per_second > 0 ? `${formatBytes(p.bytes_per_second)}/s` : "";
+  const eta = p.phase === "flashing" || p.phase === "verifying" ? etaText(p) : "";
+  progressSpeedEl.textContent = [smoothedRate > 0 ? `${formatBytes(smoothedRate)}/s` : "", eta]
+    .filter(Boolean).join(" · ");
 
-  if (p.phase === "flashing" && p.bytes_written > 0) setStatus("writing to drive…");
-  else if (p.phase === "wiping")    setStatus("erasing the drive so it is safe to reuse…");
-  else if (p.phase === "hashing")   setStatus("hashing source image…");
-  else if (p.phase === "verifying") setStatus("verifying write integrity…");
+  // Until the first bytes land, the password dialog is what we are waiting on.
+  if (p.phase === "flashing" && p.bytes_written === 0) return;
+  if (phaseStatus[p.phase]) setStatus(phaseStatus[p.phase], "", true);
 });
 
 // Initial drive load (silent — no pulse on first load)

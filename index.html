@@ -53,6 +53,18 @@
       </div>
     </div>
 
+    <!-- Confirm dialog — replaces window.confirm() -->
+    <div id="ask-overlay" class="about-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-body">
+      <div class="about-card ask-card">
+        <h2 class="ask-title" id="ask-title"></h2>
+        <p class="ask-body" id="ask-body"></p>
+        <div class="ask-actions">
+          <button id="ask-no" class="ask-no"></button>
+          <button id="ask-yes" class="ask-yes"></button>
+        </div>
+      </div>
+    </div>
+
     <!-- Drag-and-drop affordance -->
     <div id="drop-overlay" class="drop-overlay hidden">
       <div class="drop-card">
@@ -153,12 +165,12 @@
 
             <button id="flash" class="flash-btn" disabled>FLASH</button>
             <button id="cancel-flash" class="cancel-btn hidden">CANCEL</button>
+            <button id="flash-again" class="step-btn hidden">Flash another drive…</button>
 
             <div id="progress" class="progress hidden">
               <div class="progress-phase-label" id="progress-phase">WRITING</div>
               <div class="progress-track">
                 <div class="progress-fill" id="progress-fill"></div>
-                <div class="marker" style="left:40%"></div>
                 <div class="marker" style="left:70%"></div>
               </div>
               <div class="progress-stats">
@@ -167,7 +179,7 @@
               </div>
             </div>
 
-            <div id="status" class="status"></div>
+            <div id="status" class="status" aria-live="polite"></div>
           </div>
         </section>
 

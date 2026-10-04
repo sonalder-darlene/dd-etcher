@@ -838,10 +838,55 @@ button:disabled { opacity: 0.30; cursor: not-allowed; }
   min-height: 16px;
   color: var(--text-mid);
   line-height: 1.5;
+  white-space: pre-line;
   transition: color 150ms;
 }
 .status.error { color: var(--danger); font-family: inherit; font-size: 13px; }
 .status.ok    { font-family: 'Gulax', sans-serif; font-size: 16px; letter-spacing: 0.04em; color: var(--success); }
+
+/* One entrance per new message — never per progress event. */
+.text-enter { animation: text-enter 260ms cubic-bezier(0.32, 0.72, 0, 1); }
+@keyframes text-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* The only thing that moves while a step runs. */
+.dots > span { animation: dot 1.2s ease-in-out infinite both; }
+.dots > span:nth-child(2) { animation-delay: 0.2s; }
+.dots > span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot {
+  0%, 80%, 100% { opacity: 0.2; }
+  40%           { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-enter, .dots > span { animation: none; }
+}
+
+/* ─── Confirm dialog ─────────────────────────────────────────────────────── */
+.ask-card { gap: 14px; }
+.ask-title {
+  margin: 0;
+  font-family: 'Gulax', sans-serif;
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.ask-body { margin: 0; color: var(--text-mid); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.ask-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+.ask-no, .ask-yes {
+  font-family: 'Gulax', sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 11px 12px;
+}
+.ask-no { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.ask-no:hover { background: var(--border); }
+.ask-yes { background: var(--accent); color: #071200; border-color: var(--accent); }
+.ask-yes:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.ask-yes.danger { background: var(--danger-dim); color: var(--danger); border-color: var(--danger); }
+.ask-yes.danger:hover { background: rgba(255, 61, 61, 0.20); }
 
 /* ─── About overlay ──────────────────────────────────────────────────────── */
 .about-overlay {
