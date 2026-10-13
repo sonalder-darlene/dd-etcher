@@ -1,9 +1,8 @@
 //! Reading disk images, compressed or not.
 //!
-//! Decompression happens here, in the unprivileged parent process, on the way
-//! into the pipe that feeds `dd`. The privileged helper never learns the image
-//! was compressed — it still just writes the bytes it is handed. That keeps the
-//! whole feature out of the code that runs as root.
+//! Decompression happens here, in the app, on the way into the pipe that feeds
+//! `dd`. dd never learns the image was compressed — it still just writes the
+//! bytes it is handed.
 
 use anyhow::{anyhow, Context, Result};
 use std::fs::File;

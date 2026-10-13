@@ -1,14 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use zeroize::Zeroizing;
 
 pub struct FlashState {
     pub cancel: Arc<AtomicBool>,
@@ -60,11 +62,6 @@ pub async fn flash(
     // Stop the background source hash if the run ended before it was needed.
     cancel.store(true, Ordering::Relaxed);
 
-    // Drop the cached sudo credential rather than leaving it valid for the
-    // default five minutes after we are done with it.
-    #[cfg(target_os = "macos")]
-    let _ = Command::new("/usr/bin/sudo").arg("-k").status();
-
     state.busy.store(false, Ordering::SeqCst);
     result.map_err(|e| format!("{e:#}"))
 }
@@ -94,7 +91,7 @@ async fn flash_inner(
 
     // Resolve the device path for the selected drive id. We intentionally
     // build the path ourselves rather than trusting the frontend, so the
-    // privileged dd invocation can only target an enumerated drive.
+    // drive we ask permission for can only be an enumerated one.
     let device_path = resolve_device_path(&drive_id)?;
 
     // Hash the source alongside the write rather than after it: it reads from
@@ -106,6 +103,16 @@ async fn flash_inner(
         let cancel = cancel.clone();
         move || sha256_file(&path, hashed, cancel)
     });
+
+    // The only privileged step: macOS asks for permission and hands back an
+    // open descriptor. The write, the read-back and any wipe all go through it.
+    let dev = tokio::task::spawn_blocking({
+        let device_path = device_path.clone();
+        move || open_device(&device_path)
+    })
+    .await
+    .context("open task panicked")??;
+    let dev = Arc::new(dev);
 
     // --- phase: flashing ---
     let progress = Arc::new(AtomicU64::new(0));
@@ -121,11 +128,10 @@ async fn flash_inner(
 
     let flash_result = tokio::task::spawn_blocking({
         let image_path = image_path.clone();
-        let device_path = device_path.clone();
-        let drive_id_c = drive_id.clone();
+        let dev = dev.clone();
         let progress = progress.clone();
         let cancel = cancel.clone();
-        move || run_dd(&image_path, &device_path, &drive_id_c, progress, cancel)
+        move || run_dd(&image_path, &dev, progress, cancel)
     })
     .await
     .context("flash task panicked")?;
@@ -149,8 +155,8 @@ async fn flash_inner(
             },
         );
         let wiped = tokio::task::spawn_blocking({
-            let device_path = device_path.clone();
-            move || wipe_device(&device_path)
+            let dev = dev.clone();
+            move || wipe(&dev, drive_size_bytes)
         })
         .await
         .context("wipe task panicked")?;
@@ -196,19 +202,10 @@ async fn flash_inner(
     let image_hash = image_hash??;
 
     // --- phase: verifying ---
-
-    // Re-unmount: macOS auto-mounts filesystems it recognises after a write.
-    // Without this, reads from the block device stall while the OS accesses it.
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("diskutil")
-            .args(["unmountDisk", "force", &format!("/dev/{drive_id}")])
-            .status()
-            .ok();
-    }
-
-    // Hash the device via the privileged helper. sudo -n reuses the cached
-    // credential from the flash step — no second password prompt.
+    // Read back through the descriptor we wrote with. On macOS it is the raw
+    // device, so nothing comes from a cache; and while we hold it open macOS
+    // does not re-read the new partition table, so nothing gets mounted under
+    // the check.
     let _ = app.emit(
         "flash-progress",
         FlashProgress {
@@ -218,98 +215,44 @@ async fn flash_inner(
             phase: "verifying",
         },
     );
-
-    let self_exe = std::env::current_exe().context("cannot find own executable")?;
-
-    // Use tokio::process so we can read stderr line-by-line for live progress
-    // while the privileged helper hashes the device.
-    let mut child = tokio::process::Command::new("/usr/bin/sudo")
-        .args([
-            "-n",
-            self_exe.to_string_lossy().as_ref(),
-            "--privileged-sha256",
-            &device_path,
-            &total_bytes.to_string(),
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn privileged sha256")?;
-
-    // Read progress lines from stderr and emit events.
-    let stderr = child.stderr.take().unwrap();
-    use tokio::io::AsyncBufReadExt as _;
-    let mut lines = tokio::io::BufReader::new(stderr);
-    let mut line = String::new();
-    let mut last_bytes = 0u64;
-    let mut last_tick = std::time::Instant::now();
-    // Poll in one-second slices rather than blocking on read_line: a drive that
-    // dies after the write would otherwise hang here forever, and a cancel
-    // would go unnoticed. Matches the write phase's 120s stall budget.
-    let mut stalled = Duration::ZERO;
-    loop {
-        line.clear();
-        match tokio::time::timeout(Duration::from_secs(1), lines.read_line(&mut line)).await {
-            Err(_elapsed) => {
-                if cancel.load(Ordering::Relaxed) {
-                    let _ = child.kill().await;
-                    return Err(anyhow!("cancelled after write"));
-                }
-                stalled += Duration::from_secs(1);
-                if stalled >= Duration::from_secs(120) {
-                    let _ = child.kill().await;
-                    let _ = app.emit("flash-stalled", ());
-                    return Err(anyhow!(
-                        "the drive stopped responding during verification — the write itself completed"
-                    ));
-                }
-                continue;
-            }
-            Ok(Ok(0)) => break,
-            Ok(Ok(_)) => stalled = Duration::ZERO,
-            Ok(Err(e)) => return Err(e).context("reading verification progress"),
+    let verified = Arc::new(AtomicU64::new(0));
+    let verify_stop = Arc::new(AtomicBool::new(false));
+    let mut verify_ticker = spawn_progress_ticker(
+        app.clone(),
+        verified.clone(),
+        verify_stop.clone(),
+        cancel.clone(),
+        total_bytes,
+        "verifying",
+    );
+    let read_back = tokio::task::spawn_blocking({
+        let dev = dev.clone();
+        let verified = verified.clone();
+        let cancel = cancel.clone();
+        move || hash_device(&dev, total_bytes, verified, cancel)
+    });
+    let device_hash = tokio::select! {
+        biased;
+        // The ticker only ends on its own after a two-minute stall. Do not wait
+        // on a read that a dying drive may never return.
+        _ = &mut verify_ticker => {
+            return Err(anyhow!(
+                "the drive stopped responding during verification — the write itself completed"
+            ));
         }
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill().await;
-            return Err(anyhow!("cancelled after write"));
-        }
-        if let Ok(bytes) = line.trim().parse::<u64>() {
-            let now = std::time::Instant::now();
-            let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
-            let rate = ((bytes.saturating_sub(last_bytes)) as f64 / dt) as u64;
-            last_bytes = bytes;
-            last_tick = now;
-            let _ = app.emit(
-                "flash-progress",
-                FlashProgress {
-                    bytes_written: bytes,
-                    total_bytes,
-                    bytes_per_second: rate,
-                    phase: "verifying",
-                },
-            );
-        }
-    }
+        r = read_back => r.context("verify task panicked")?,
+    };
+    verify_stop.store(true, Ordering::Relaxed);
+    let _ = verify_ticker.await;
+    let device_hash = device_hash?;
 
-    // Collect stdout (the final SHA-256 hex) and wait for exit.
-    let mut stdout_buf = Vec::new();
-    use tokio::io::AsyncReadExt as _;
-    if let Some(mut out) = child.stdout.take() {
-        out.read_to_end(&mut stdout_buf).await.ok();
-    }
-    let status = child.wait().await.context("waiting for sha256 helper")?;
-
-    if !status.success() {
+    if device_hash != image_hash {
+        let hex = |h: &[u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
         return Err(anyhow!(
-            "verification read failed: helper exited with {status}"
+            "verification failed: checksum mismatch\nimage:  {}\ndevice: {}",
+            hex(&image_hash),
+            hex(&device_hash)
         ));
-    }
-
-    let device_hash_hex = String::from_utf8_lossy(&stdout_buf).trim().to_string();
-    let image_hash_hex: String = image_hash.iter().map(|b| format!("{b:02x}")).collect();
-
-    if device_hash_hex != image_hash_hex {
-        return Err(anyhow!("verification failed: checksum mismatch\nimage:  {image_hash_hex}\ndevice: {device_hash_hex}"));
     }
 
     let _ = app.emit(
@@ -370,221 +313,443 @@ fn resolve_device_path(drive_id: &str) -> Result<String> {
     {
         return Err(anyhow!("invalid drive id: {drive_id}"));
     }
-    #[cfg(target_os = "macos")]
-    {
-        // Use the buffered device (/dev/diskN) rather than the raw device
-        // (/dev/rdiskN). Raw access is more restricted on macOS 15+; dd
-        // through the buffer cache is slightly slower but reliably works.
-        Ok(format!("/dev/{drive_id}"))
+    Ok(format!("/dev/{drive_id}"))
+}
+
+/// Open the whole drive for reading and writing — the one privileged step.
+///
+/// authopen(1) is Apple's tool for exactly this. We obtain its
+/// `sys.openfile` right ourselves first, so the password / Touch ID sheet
+/// names dd-Etcher rather than authopen; it then opens the device as root and
+/// passes the descriptor back. authopen checks the Removable Volumes privacy
+/// permission against this app instead of itself, so the first flash shows a
+/// one-click "access files on a removable volume" prompt. Nothing of ours runs
+/// as root, and Full Disk Access never comes into it.
+#[cfg(target_os = "macos")]
+fn open_device(device: &str) -> Result<File> {
+    if !crate::is_safe_device(device) {
+        return Err(anyhow!("refusing to open {device}"));
     }
-    #[cfg(target_os = "linux")]
-    {
-        Ok(format!("/dev/{drive_id}"))
+    // The raw node bypasses the buffer cache: much faster, and the read-back
+    // checks the drive rather than our own cached writes.
+    let raw = device.replacen("/dev/disk", "/dev/rdisk", 1);
+    let auth = authorization::Authorization::obtain(&format!("sys.openfile.readwrite.{raw}"))?;
+
+    // Unmount after auth so "Waiting for your permission" is accurate right up
+    // until we start writing.
+    Command::new("diskutil")
+        .args(["unmountDisk", "force", device])
+        .status()
+        .context("diskutil unmountDisk failed")?;
+
+    let mut authopen = Command::new("/usr/libexec/authopen");
+    authopen.args([
+        "-stdoutpipe",
+        "-extauth",
+        "-o",
+        &libc::O_RDWR.to_string(),
+        &raw,
+    ]);
+    receive_fd(authopen, &auth.external_form()?).map_err(|e| {
+        if format!("{e:#}").to_lowercase().contains("not permitted") {
+            anyhow!(
+                "macOS blocked access to the drive.\n\
+                 Turn on Removable Volumes for dd-Etcher in System Settings → \
+                 Privacy & Security → Files & Folders, then try again."
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// Linux has no authopen: pkexec runs our own binary just long enough to open
+/// the device and pass the descriptor back (`privileged_open` in lib.rs).
+#[cfg(target_os = "linux")]
+fn open_device(device: &str) -> Result<File> {
+    if !crate::is_safe_device(device) {
+        return Err(anyhow!("refusing to open {device}"));
+    }
+    let exe = std::env::current_exe().context("cannot find own executable")?;
+    let mut pkexec = Command::new("pkexec");
+    pkexec.arg(exe).args(["--privileged-open", device]);
+    receive_fd(pkexec, &[])
+}
+
+/// Run a device opener with a Unix socket as its stdout, feed it `input`, and
+/// take the file descriptor it sends back.
+fn receive_fd(mut cmd: Command, input: &[u8]) -> Result<File> {
+    let (ours, theirs) = UnixStream::pair().context("creating a socket pair")?;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(OwnedFd::from(theirs))
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not start the device opener")?;
+    // `cmd` still holds our copy of the child's end. Close it, or an opener
+    // that exits without sending anything leaves recvmsg waiting forever.
+    drop(cmd);
+    // A write error means the opener already quit; its stderr says why.
+    let _ = child.stdin.take().map(|mut s| s.write_all(input));
+
+    let fd = recv_fd(&ours);
+    let out = child
+        .wait_with_output()
+        .context("waiting for the device opener")?;
+    match fd {
+        Ok(Some(fd)) if out.status.success() => Ok(File::from(fd)),
+        _ => {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            Err(anyhow!(
+                "could not open the drive: {}",
+                if msg.trim().is_empty() {
+                    out.status.to_string()
+                } else {
+                    msg.trim().to_string()
+                }
+            ))
+        }
     }
 }
 
-/// Show a native password dialog and authenticate with sudo.
-///
-/// Separating auth from execution means Cancel is handled before sudo is
-/// involved at all — no retries, no "Sorry, try again." loops.
-/// `sudo -S -v` validates the credential and caches it; subsequent calls
-/// use `sudo -n` (non-interactive) against that cache.
-#[cfg(target_os = "macos")]
-fn authenticate_sudo() -> Result<()> {
-    let dialog = Command::new("/usr/bin/osascript")
-        .args([
-            "-e",
-            "set r to display dialog \
-             \"Enter your password to let dd-Etcher write to the drive.\" \
-             & return & return & \
-             \"macOS only lets an administrator write to a whole disk. \
-             The password is used for this flash and its check, then forgotten.\" \
-             with hidden answer default answer \"\" \
-             with title \"dd-Etcher\" \
-             buttons {\"Cancel\", \"OK\"} default button \"OK\"",
-            "-e",
-            "return text returned of r",
-        ])
-        .output()
-        .context("failed to show password dialog")?;
+/// Receive one file descriptor sent with SCM_RIGHTS. `None` if the sender
+/// hung up without sending one.
+fn recv_fd(sock: &UnixStream) -> std::io::Result<Option<OwnedFd>> {
+    let mut data = [0u8; 64];
+    let mut iov = libc::iovec {
+        iov_base: data.as_mut_ptr().cast(),
+        iov_len: data.len(),
+    };
+    // u64s, not bytes: the control buffer must be aligned for cmsghdr.
+    let mut space = [0u64; 8];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = space.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&space) as _;
 
-    if !dialog.status.success() {
-        return Err(anyhow!("Authentication cancelled."));
+    let n = loop {
+        let n = unsafe { libc::recvmsg(sock.as_raw_fd(), &mut msg, 0) };
+        if n >= 0 {
+            break n;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    };
+    if n == 0 {
+        return Ok(None);
     }
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null()
+            || (*cmsg).cmsg_level != libc::SOL_SOCKET
+            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+        {
+            return Ok(None);
+        }
+        let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>());
+        Ok(Some(OwnedFd::from_raw_fd(fd)))
+    }
+}
 
-    // Wrap the password in Zeroizing so it is wiped from memory on drop.
-    let password = Zeroizing::new(dialog.stdout);
-
-    // sudo -S reads the password from stdin; -p "" suppresses its own prompt;
-    // -v just validates and caches the credential without running a command.
-    let mut sudo = Command::new("/usr/bin/sudo")
-        .args(["-S", "-p", "", "-v"])
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn sudo")?;
-
-    let mut stdin = sudo.stdin.take().unwrap();
-    stdin.write_all(&password).context("sending password")?;
-    stdin.write_all(b"\n").ok();
-    drop(stdin);
-
-    let out = sudo.wait_with_output().context("waiting for sudo")?;
-    if !out.status.success() {
-        return Err(anyhow!("Authentication failed — wrong password?"));
+/// Send `fd` over the Unix socket `sock` — the other half of `recv_fd`, used by
+/// the Linux helper.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn send_fd(sock: libc::c_int, fd: libc::c_int) -> std::io::Result<()> {
+    let int = std::mem::size_of::<libc::c_int>() as u32;
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    let mut space = [0u64; 8];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = space.as_mut_ptr().cast();
+    unsafe {
+        msg.msg_controllen = libc::CMSG_SPACE(int) as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(int) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), fd);
+        if libc::sendmsg(sock, &msg, 0) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }
 
-/// Flash the image to the device with root privileges.
-///
-/// Auth is separated from execution: we collect the password once via a
-/// native dialog, cache it with `sudo -v`, then use `sudo -n` for both
-/// the flash and verify steps (no repeated prompts).
+/// The Security.framework calls behind authopen's `-extauth`.
+#[cfg(target_os = "macos")]
+mod authorization {
+    use anyhow::{anyhow, Result};
+    use std::ffi::{c_char, c_void, CString};
+    use std::ptr;
+
+    #[repr(C)]
+    struct AuthorizationItem {
+        name: *const c_char,
+        value_length: usize,
+        value: *mut c_void,
+        flags: u32,
+    }
+
+    #[repr(C)]
+    struct AuthorizationItemSet {
+        count: u32,
+        items: *mut AuthorizationItem,
+    }
+
+    type AuthorizationRef = *mut c_void;
+
+    const INTERACTION_ALLOWED: u32 = 1 << 0;
+    const EXTEND_RIGHTS: u32 = 1 << 1;
+    const PRE_AUTHORIZE: u32 = 1 << 4;
+    const ERR_CANCELED: i32 = -60006;
+
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        fn AuthorizationCreate(
+            rights: *const AuthorizationItemSet,
+            environment: *const AuthorizationItemSet,
+            flags: u32,
+            authorization: *mut AuthorizationRef,
+        ) -> i32;
+        fn AuthorizationMakeExternalForm(
+            authorization: AuthorizationRef,
+            form: *mut [u8; 32],
+        ) -> i32;
+        fn AuthorizationFree(authorization: AuthorizationRef, flags: u32) -> i32;
+    }
+
+    /// A granted right. Released on drop, so it never outlives the flash.
+    pub struct Authorization(AuthorizationRef);
+
+    impl Authorization {
+        /// Ask for `right`. macOS shows its own administrator sheet.
+        pub fn obtain(right: &str) -> Result<Self> {
+            let name = CString::new(right)?;
+            let mut item = AuthorizationItem {
+                name: name.as_ptr(),
+                value_length: 0,
+                value: ptr::null_mut(),
+                flags: 0,
+            };
+            let rights = AuthorizationItemSet {
+                count: 1,
+                items: &mut item,
+            };
+            let mut auth: AuthorizationRef = ptr::null_mut();
+            let flags = INTERACTION_ALLOWED | EXTEND_RIGHTS | PRE_AUTHORIZE;
+            let status = unsafe { AuthorizationCreate(&rights, ptr::null(), flags, &mut auth) };
+            if status == 0 {
+                return Ok(Self(auth));
+            }
+            if !auth.is_null() {
+                unsafe { AuthorizationFree(auth, 0) };
+            }
+            Err(if status == ERR_CANCELED {
+                anyhow!("Authentication cancelled.")
+            } else {
+                anyhow!("macOS did not grant access to the drive (authorization error {status})")
+            })
+        }
+
+        /// The token authopen reads from stdin with `-extauth`.
+        pub fn external_form(&self) -> Result<[u8; 32]> {
+            let mut form = [0u8; 32];
+            match unsafe { AuthorizationMakeExternalForm(self.0, &mut form) } {
+                0 => Ok(form),
+                status => Err(anyhow!(
+                    "could not pass the authorization to authopen (error {status})"
+                )),
+            }
+        }
+    }
+
+    impl Drop for Authorization {
+        fn drop(&mut self) {
+            unsafe { AuthorizationFree(self.0, 0) };
+        }
+    }
+}
+
+/// Bytes per sector. A raw macOS disk refuses reads and writes that are not
+/// whole sectors; a Linux block device goes through the page cache and takes
+/// any length.
+fn sector_size(dev: &File) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        const DKIOCGETBLOCKSIZE: libc::c_ulong = 0x4004_6418; // _IOR('d', 24, uint32_t)
+        let mut size: u32 = 0;
+        let ok = unsafe { libc::ioctl(dev.as_raw_fd(), DKIOCGETBLOCKSIZE, &mut size as *mut u32) };
+        if ok == 0 && size > 0 {
+            size as u64
+        } else {
+            512
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = dev;
+        1
+    }
+}
+
+/// Write the image with dd(1). dd runs as the user, not root: it inherits the
+/// already-open drive as its stdout. The image is pumped through this process
+/// so a .xz decompresses on the way and progress can be counted.
 fn run_dd(
     image: &str,
-    device: &str,
-    drive_id: &str,
+    dev: &File,
     progress: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
+    // ibs/obs rather than bs: dd then gathers short pipe reads into whole
+    // 4 MiB writes, and a raw disk refuses anything but whole sectors.
     #[cfg(target_os = "macos")]
-    authenticate_sudo()?;
-
-    // Unmount after auth so the "Requesting permission…" status is accurate
-    // right up until we start writing.
-    #[cfg(target_os = "macos")]
-    Command::new("diskutil")
-        .args(["unmountDisk", "force", &format!("/dev/{drive_id}")])
-        .status()
-        .context("diskutil unmountDisk failed")?;
-
-    let self_exe = std::env::current_exe().context("cannot find own executable")?;
-
-    #[cfg(target_os = "macos")]
-    let mut child = Command::new("/usr/bin/sudo")
-        .args([
-            "-n",
-            self_exe.to_string_lossy().as_ref(),
-            "--privileged-flash",
-            device,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn privileged helper")?;
-
+    let args = ["ibs=4m", "obs=4m"];
     #[cfg(target_os = "linux")]
-    let mut child = Command::new("pkexec")
-        .args([
-            self_exe.to_string_lossy().as_ref(),
-            "--privileged-flash",
-            device,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn pkexec")?;
+    let args = ["bs=4M", "conv=fsync"];
 
-    let pipe_result: Result<()> = {
-        let mut stdin = child.stdin.take().unwrap();
-        let mut src = crate::image::open_image(image)?;
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let n = src.read(&mut buf).context("reading image")?;
-            if n == 0 {
-                break;
-            }
-            stdin.write_all(&buf[..n]).context("writing to helper")?;
-            progress.fetch_add(n as u64, Ordering::Relaxed);
-        }
-        Ok(())
-    };
+    let mut child = Command::new("/bin/dd")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(dev.try_clone().context("duplicating the drive handle")?)
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start dd")?;
+
+    let mut stdin = child.stdin.take().unwrap();
+    let pumped = pump(image, &mut stdin, sector_size(dev), &progress, &cancel);
+    drop(stdin);
 
     if cancel.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
-
-    let stderr_bytes = child
-        .stderr
-        .take()
-        .map(|mut r| {
-            let mut b = Vec::new();
-            std::io::Read::read_to_end(&mut r, &mut b).ok();
-            b
-        })
-        .unwrap_or_default();
-
-    let status = child.wait().context("waiting for helper")?;
-    pipe_result?;
+    let out = child.wait_with_output().context("waiting for dd")?;
 
     if cancel.load(Ordering::Relaxed) {
         return Err(anyhow!("cancelled"));
     }
-
-    if !status.success() {
-        let msg = String::from_utf8_lossy(&stderr_bytes);
-        let msg_lower = msg.to_lowercase();
-        if msg_lower.contains("operation not permitted") || msg_lower.contains("permission denied")
-        {
-            return Err(anyhow!(
-                "Permission denied.\n\
-                 Go to System Settings → Privacy & Security → Full Disk Access\n\
-                 and add dd-Etcher, then try again."
-            ));
-        }
+    // dd's own message says more than the broken pipe it leaves us with.
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!(
-            "helper exited with {status}{}",
-            if msg.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", msg.trim())
-            }
+            "dd failed ({}): {}",
+            out.status,
+            msg.lines().next().unwrap_or("").trim()
         ));
+    }
+    pumped
+}
+
+/// Feed the image into dd, then zeros up to the next whole sector.
+fn pump(
+    image: &str,
+    to_dd: &mut ChildStdin,
+    sector: u64,
+    progress: &AtomicU64,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let mut src = crate::image::open_image(image)?;
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut written = 0u64;
+    while !cancel.load(Ordering::Relaxed) {
+        let n = src.read(&mut buf).context("reading image")?;
+        if n == 0 {
+            let pad = (sector - written % sector) % sector;
+            to_dd
+                .write_all(&vec![0u8; pad as usize])
+                .context("writing to dd")?;
+            break;
+        }
+        to_dd.write_all(&buf[..n]).context("writing to dd")?;
+        written += n as u64;
+        progress.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(())
 }
 
-/// Ask the privileged helper to blank a partially written device. Reuses the
-/// sudo credential cached by the flash step, so there is no second prompt.
-fn wipe_device(device_path: &str) -> Result<()> {
-    let self_exe = std::env::current_exe().context("cannot find own executable")?;
+/// Make a partially written drive unambiguously blank.
+///
+/// A cancelled or failed write is the dangerous case, not a harmless one. An
+/// image lays down its partition table and bootloader first, so a drive
+/// abandoned at 60% still mounts, still looks bootable, and will still start an
+/// installer that then fails partway through repartitioning the user's real
+/// disk. Zeroing the head takes out the MBR, the primary GPT, and the common
+/// filesystem superblocks; zeroing the tail takes out the backup GPT that would
+/// otherwise let the OS reconstruct the partition table. What is left is a blank
+/// drive the OS offers to initialise — which is what "cancel" should produce.
+///
+/// `size` is the drive size the OS reported: seeking to the end of a macOS
+/// disk device answers 0, which would wipe nothing at all.
+fn wipe(dev: &File, size: u64) -> Result<()> {
+    const HEAD: u64 = 16 * 1024 * 1024;
+    const TAIL: u64 = 1024 * 1024;
 
-    #[cfg(target_os = "macos")]
-    let output = Command::new("/usr/bin/sudo")
-        .args([
-            "-n",
-            self_exe.to_string_lossy().as_ref(),
-            "--privileged-wipe",
-            device_path,
-        ])
-        .output();
-
+    zero(dev, 0, HEAD.min(size)).context("wiping the start of the drive")?;
+    if size > HEAD + TAIL {
+        zero(dev, size - TAIL, TAIL).context("wiping the end of the drive")?;
+    }
+    // macOS raw-device writes are already on the drive (and F_FULLFSYNC, which
+    // sync_all uses there, is refused on device nodes). Linux goes through the
+    // page cache.
     #[cfg(target_os = "linux")]
-    let output = Command::new("pkexec")
-        .args([
-            self_exe.to_string_lossy().as_ref(),
-            "--privileged-wipe",
-            device_path,
-        ])
-        .output();
+    dev.sync_all().context("flushing the drive")?;
+    Ok(())
+}
 
-    let output = output.context("failed to spawn the wipe helper")?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "{}",
-            if msg.trim().is_empty() {
-                format!("helper exited with {}", output.status)
-            } else {
-                msg.trim().to_string()
-            }
-        ));
+/// Write `len` zero bytes at `start`, in 1 MiB chunks — whole sectors for every
+/// sector size in practice.
+fn zero(mut dev: &File, start: u64, len: u64) -> std::io::Result<()> {
+    let zeros = vec![0u8; 1024 * 1024];
+    dev.seek(SeekFrom::Start(start))?;
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(zeros.len() as u64) as usize;
+        dev.write_all(&zeros[..n])?;
+        left -= n as u64;
     }
     Ok(())
+}
+
+/// SHA-256 of the first `len` bytes on the drive.
+fn hash_device(
+    mut dev: &File,
+    len: u64,
+    done: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+) -> Result<[u8; 32]> {
+    // Linux would answer from the page cache the write just filled.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::posix_fadvise(dev.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+    }
+    let sector = sector_size(dev);
+    dev.seek(SeekFrom::Start(0))
+        .context("rewinding the drive")?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut left = len;
+    while left > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("cancelled after write"));
+        }
+        // Read whole sectors, as the write did; hash only the image's share.
+        let want = left.min(buf.len() as u64);
+        let read = want.next_multiple_of(sector) as usize;
+        dev.read_exact(&mut buf[..read])
+            .context("reading the drive back")?;
+        hasher.update(&buf[..want as usize]);
+        left -= want;
+        done.fetch_add(want, Ordering::Relaxed);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn spawn_progress_ticker(
@@ -607,8 +772,10 @@ fn spawn_progress_ticker(
             let dt = now.duration_since(last_tick).as_secs_f64().max(0.001);
             let rate = ((bytes.saturating_sub(last_bytes)) as f64 / dt) as u64;
 
-            // Stall detection: if bytes have started but not moved for 120s, auto-cancel.
-            if bytes > 0 && bytes == last_bytes {
+            // Stall detection: if bytes have not moved for 120s, auto-cancel.
+            // A ticker only starts once the drive is open, so there is no
+            // password prompt to wait out — no movement at all is a stall too.
+            if bytes == last_bytes {
                 match stall_since {
                     None => stall_since = Some(now),
                     Some(t) if now.duration_since(t).as_secs() >= 120 => {
@@ -658,7 +825,7 @@ fn sha256_file(path: &str, hashed: Arc<AtomicU64>, cancel: Arc<AtomicBool>) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_device_path;
+    use super::*;
 
     /// The frontend supplies a drive id, never a path. This is the charset
     /// gate that stands between an IPC caller and an arbitrary target; the
@@ -686,11 +853,71 @@ mod tests {
     }
 
     /// An empty id passes nothing useful downstream, and a partition id is
-    /// charset-clean here but caught by `is_safe_device` in the helper. This
-    /// documents that the two checks are deliberately not the same check.
+    /// charset-clean here but caught by `is_safe_device` before the drive is
+    /// opened. This documents that the two checks are deliberately not the
+    /// same check.
     #[test]
     fn charset_gate_is_not_the_shape_gate() {
         assert_eq!(resolve_device_path("disk2s1").unwrap(), "/dev/disk2s1");
         assert!(!crate::is_safe_device("/dev/disk2s1"));
+    }
+
+    /// authopen hands the drive over as a descriptor; ours must arrive as the
+    /// same open file, not merely a valid number.
+    #[test]
+    fn a_passed_descriptor_is_the_same_open_file() {
+        let path = std::env::temp_dir().join(format!("dd-etcher-fd-{}", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let (a, b) = UnixStream::pair().unwrap();
+        send_fd(a.as_raw_fd(), file.as_raw_fd()).unwrap();
+        let got = File::from(recv_fd(&b).unwrap().unwrap());
+        (&got).write_all(b"same file").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"same file");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// An opener that quits without sending — authopen after a refusal — must
+    /// come back as an error. Holding our own copy of its socket end would
+    /// turn this into a hang.
+    #[test]
+    fn an_opener_that_sends_nothing_is_an_error() {
+        assert!(receive_fd(Command::new("/usr/bin/false"), &[]).is_err());
+    }
+
+    /// Write, read back, wipe — on a plain file standing in for the drive. The
+    /// image is deliberately not whole sectors: the drive gets a padded tail,
+    /// and the read-back must still hash exactly the image's bytes.
+    #[test]
+    fn writes_pads_reads_back_and_wipes() {
+        let dir = std::env::temp_dir().join(format!("dd-etcher-flash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("odd.img");
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8 + 1).collect();
+        std::fs::write(&image, &data).unwrap();
+        let dev = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dir.join("drive"))
+            .unwrap();
+        let idle = || Arc::new(AtomicBool::new(false));
+
+        let progress = Arc::new(AtomicU64::new(0));
+        run_dd(image.to_str().unwrap(), &dev, progress.clone(), idle()).unwrap();
+        assert_eq!(progress.load(Ordering::Relaxed), 1000);
+        let padded = 1000u64.next_multiple_of(sector_size(&dev));
+        assert_eq!(dev.metadata().unwrap().len(), padded);
+
+        let read_back = hash_device(&dev, 1000, Arc::new(AtomicU64::new(0)), idle()).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&data).into();
+        assert_eq!(read_back, expected);
+
+        wipe(&dev, padded).unwrap();
+        assert!(std::fs::read(dir.join("drive"))
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

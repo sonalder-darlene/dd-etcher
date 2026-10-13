@@ -8,22 +8,6 @@ document.documentElement.setAttribute("data-theme", localStorage.getItem("theme"
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-// ─── FDA ─────────────────────────────────────────────────────────────────
-const fdaOverlay = $<HTMLDivElement>("fda-overlay");
-const fdaHint    = $<HTMLSpanElement>("fda-hint");
-
-async function checkFda() {
-  const ok: boolean = await invoke("check_fda");
-  fdaOverlay.classList.toggle("hidden", ok);
-  return ok;
-}
-$<HTMLButtonElement>("fda-open").addEventListener("click", () => invoke("open_fda_settings"));
-$<HTMLButtonElement>("fda-check").addEventListener("click", async () => {
-  fdaHint.textContent = "";
-  if (!await checkFda()) fdaHint.textContent = "Still not granted — toggle dd-Etcher on in the list.";
-});
-checkFda();
-
 // ─── Theme ───────────────────────────────────────────────────────────────
 $<HTMLButtonElement>("theme-toggle").addEventListener("click", () => {
   const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
@@ -598,7 +582,7 @@ flashBtn.addEventListener("click", async () => {
   progressBytesEl.textContent = "—";
   progressSpeedEl.textContent = "";
   progressEl.classList.remove("hidden");
-  setStatus("Waiting for your password", "", true);
+  setStatus("Waiting for your permission", "", true);
 
   try {
     await invoke("flash", { imagePath: selectedImage, driveId: drive.id });
@@ -708,7 +692,7 @@ listen<FlashProgress>("flash-progress", (event) => {
   progressSpeedEl.textContent = [smoothedRate > 0 ? `${formatBytes(smoothedRate)}/s` : "", eta]
     .filter(Boolean).join(" · ");
 
-  // Until the first bytes land, the password dialog is what we are waiting on.
+  // Until the first bytes land, the macOS permission prompt is what we are waiting on.
   if (p.phase === "flashing" && p.bytes_written === 0) return;
   if (phaseStatus[p.phase]) setStatus(phaseStatus[p.phase], "", true);
 });

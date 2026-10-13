@@ -7,14 +7,14 @@ A minimal image flasher for macOS (and soon Linux). Think Balena Etcher, but wit
 ## Install
 
 1. Download the `.dmg` from [Releases](https://github.com/sonalder-darlene/dd-etcher/releases). One build runs on both Apple Silicon and Intel Macs.
-2. Drag **dd-Etcher** into `/Applications`. Install it there, not in `~/Applications`: the app runs itself as root to write the drive, which is only safe from a folder you cannot write to without a password.
+2. Drag **dd-Etcher** into `/Applications`.
 3. dd-Etcher is not notarized by Apple, so on first launch macOS will claim the app "is damaged and can't be opened". It isn't — macOS says this about every download that is not notarized. Clear the download flag once in Terminal:
 
    ```sh
    xattr -dr com.apple.quarantine /Applications/dd-Etcher.app
    ```
 
-4. Launch it. It will ask for **Full Disk Access** and walk you through granting it ([why](#requirements)).
+4. Launch it. When you flash, macOS asks for an administrator password (or Touch ID) and, the first time only, whether dd-Etcher may access removable volumes — click **Allow**. No Full Disk Access ([how](#permissions)).
 
 ## Why
 
@@ -31,9 +31,9 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 - Select an image (`.img`, `.iso`, `.dmg`, `.bin`, `.raw`) or an xz-compressed one (`.img.xz`) — the format Raspberry Pi OS ships in
 - Drag and drop an image onto the window
 - Select an external drive (internal drives should be hidden automatically to avoid mistakes)
-- Flash via `dd` (It will ask for your admin password to do so)
+- Flash via `dd`, running as you — macOS's own password prompt opens the drive, nothing runs as root
 - Verify flash integrity via SHA-256 checksum with live progress
-- Full Disk Access onboarding screen — blocks the UI and guides you through the one-time setup if FDA has not been granted yet
+- No Full Disk Access — only the narrow Removable Volumes permission, granted with one click
 - Built with Rust and Tauri + WKWebView
 - No telemetry, no background network calls, no accounts, no BS
 
@@ -46,23 +46,24 @@ It aims to be a simple, bloat-free, telemetry-free tool for people who are uncom
 │                             │ IPC  │                                  │
 │  • drive picker             │      │  drives.rs  — enumerate drives   │
 │  • image picker             │      │  flash.rs   — auth + flash       │
-│  • progress bar             │      │  lib.rs     — privileged helper  │
+│  • progress bar             │      │  lib.rs     — app setup          │
 └─────────────────────────────┘      └──────────────────────────────────┘
                                                     │
-                                          sudo (child process)
+                                     authopen(1) opens /dev/rdiskN and
+                                     hands back a file descriptor
                                                     │
-                                      dd-etcher --privileged-flash
-                                      dd-etcher --privileged-sha256
+                                     dd (as you) ──► the drive
 ```
 
-### Privilege escalation
+### Permissions
 
-Writing to a raw block device requires root. dd-Etcher uses a two-step approach that keeps the process tree intact so macOS TCC correctly identifies our app as the responsible process:
+Writing a whole disk takes administrator approval, but no part of dd-Etcher runs as root. It uses `authopen(1)`, the tool macOS provides for opening a device with authorization:
 
-1. **Authenticate once:** a native macOS password dialog (via `osascript`) collects the credential. `sudo -S -v` validates and caches it. Clicking Cancel aborts immediately.
-2. **Flash and verify as root:** `sudo -n` (non-interactive, cached credential) invokes our own binary with `--privileged-flash` or `--privileged-sha256`. No separate helper binary is needed; the app doubles as its own privileged helper.
+1. **Ask.** dd-Etcher requests the `sys.openfile.readwrite./dev/rdiskN` right for the drive you picked. macOS shows its own administrator prompt, naming dd-Etcher. Cancel stops there, before the drive is even unmounted.
+2. **Open.** `/usr/libexec/authopen` opens the raw device and passes the open file descriptor back over a socket. authopen checks the Removable Volumes privacy permission against dd-Etcher rather than itself, which is why the first flash shows a one-time "access files on a removable volume" prompt.
+3. **Write, verify, wipe — as you.** `dd` runs with your own rights and the drive as its stdout. The image is piped into it from the app, so a `.xz` decompresses on the way and progress can be counted. The read-back, and the wipe after a cancelled or failed write, go through the same descriptor.
 
-The image is piped from our process (which has read access granted by the file picker dialog) directly into the privileged helper's stdin, bypassing macOS's TCC restriction on reading `~/Downloads` as root.
+Earlier versions ran `dd` as root through `sudo`. macOS checks a root process against the system-wide privacy rules, so that only worked once the app had Full Disk Access.
 
 ### Drive filtering
 
@@ -71,14 +72,14 @@ The image is piped from our process (which has read access granted by the file p
 
 ### Verification
 
-After flashing, the drive is force-unmounted (macOS auto-mounts recognised filesystems). The privileged helper reads back exactly `image_size` bytes from the device and computes a SHA-256. The app hashes the source image independently. A mismatch is a hard error.
+The app hashes the source image while it writes. It then reads back exactly `image_size` bytes through the same raw-device descriptor — uncached, and still held open, so macOS cannot mount the new partitions mid-check — and compares the two SHA-256s. A mismatch is a hard error.
 
 ## Requirements
 
-- macOS 13 Ventura or later (uses WKWebView, `diskutil`, `sudo`)
-- The app must be granted **Full Disk Access** in System Settings → Privacy & Security → Full Disk Access
+- macOS 13 Ventura or later (uses WKWebView, `diskutil`, `authopen`)
+- An administrator password, to approve each flash
 
-> **Why Full Disk Access?** macOS 15+ enforces TCC for block device access even for root processes. FDA is the user-controlled gate; no app can bypass it silently.
+If you clicked **Don't Allow** at the removable-volume prompt, turn dd-Etcher back on in System Settings → Privacy & Security → Files & Folders → Removable Volumes.
 
 ## Development
 
@@ -94,10 +95,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Grant Full Disk Access to the debug binary the first time:
-`src-tauri/target/debug/dd-etcher`
-
-> **Note:** The FDA onboarding overlay only activates in release builds. In dev mode the check is skipped automatically, so the overlay will not appear. The FDA grant is still required for the privileged flash helper to write to the drive — grant it once and it persists across rebuilds.
+> **Note:** In dev mode the app is a child of your terminal, so macOS may name the terminal, not dd-Etcher, in the removable-volume prompt.
 
 ### Build
 
@@ -119,11 +117,11 @@ Output lands in `src-tauri/target/universal-apple-darwin/release/bundle/`.
 
 ## Porting to Linux
 
-The Rust core has platform-specific branches for drive enumeration (`lsblk` instead of `diskutil`) and privilege escalation (`pkexec` instead of `sudo`). The frontend is identical. Contributions and testing are welcome.
+The Rust core has platform-specific branches for drive enumeration (`lsblk` instead of `diskutil`) and for opening the drive: where macOS has `authopen`, Linux runs the app's own `--privileged-open` helper through `pkexec`, which opens the device and passes the descriptor back. Writing and verifying are shared. The frontend is identical. The Linux path has not been run on real hardware yet — contributions and testing are welcome.
 
 ## Roadmap
 
-- [ ] Improve privilege escalation, probably via SMAppService helper (removes the FDA requirement)
+- [x] No Full Disk Access: `authopen` instead of `sudo`, nothing runs as root
 - [ ] Friendlier error messages when `dd` fails mid-write (capture and surface `dd` stderr)
 - [x] Progress tracking during the verify phase
 - [ ] TUI frontend sharing the same Rust core (`ratatui`)

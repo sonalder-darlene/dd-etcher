@@ -1,24 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // When invoked as a privileged helper by sudo, write stdin to a device.
-    // This avoids needing a separate signed helper binary.
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(|s| s.as_str()) {
-        Some("--privileged-flash") if args.len() == 3 => {
-            dd_etcher_lib::privileged_flash(&args[2]);
-            return;
+    // On Linux, pkexec re-runs this binary as root only to open the device and
+    // pass the descriptor back. macOS needs no helper: authopen(1) does that.
+    #[cfg(target_os = "linux")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let [_, flag, device] = args.as_slice() {
+            if flag == "--privileged-open" {
+                dd_etcher_lib::privileged_open(device);
+                return;
+            }
         }
-        Some("--privileged-wipe") if args.len() == 3 => {
-            dd_etcher_lib::privileged_wipe(&args[2]);
-            return;
-        }
-        Some("--privileged-sha256") if args.len() == 4 => {
-            let limit: u64 = args[3].parse().unwrap_or(0);
-            dd_etcher_lib::privileged_sha256(&args[2], limit);
-            return;
-        }
-        _ => {}
     }
     dd_etcher_lib::run()
 }

@@ -144,7 +144,8 @@ mod macos {
             .and_then(|v| v.as_boolean())
             .unwrap_or(true);
 
-        let device_path = format!("/dev/{id}");
+        // The raw node is what a flash opens, so that is what the UI shows.
+        let device_path = format!("/dev/r{id}");
 
         Ok(Drive {
             id: id.to_string(),
